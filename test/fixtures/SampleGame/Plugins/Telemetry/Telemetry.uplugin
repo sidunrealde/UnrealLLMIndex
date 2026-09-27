@@ -1,0 +1,14 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "Telemetry",
+	"Description": "Sends gameplay events to an analytics backend.",
+	"Modules": [
+		{
+			"Name": "Telemetry",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}

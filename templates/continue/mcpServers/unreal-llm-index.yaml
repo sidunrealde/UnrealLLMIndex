@@ -1,0 +1,12 @@
+# Copy to <your UE project>/.continue/mcpServers/unreal-llm-index.yaml and edit both paths.
+# Continue exposes MCP tools in Agent mode.
+name: Unreal LLM Index
+version: 0.1.0
+schema: v1
+mcpServers:
+  - name: unreal-llm-index
+    command: node
+    args:
+      - D:/Projects/Plugins/UnrealLLMIndex/dist/cli.js
+      - serve
+      - D:/Projects/UnrealEngine/MyProject
