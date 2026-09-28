@@ -1,8 +1,8 @@
 {
   "name": "unreal-llm-index",
   "displayName": "Unreal LLM Index",
-  "version": "0.3.0",
-  "description": "Unreal Engine-aware index of your UE C++ project, its engine, and engine and Marketplace (Fab) plugins, for any LLM in VS Code chat: MCP tools, an Unreal agent and an @unreal chat participant.",
+  "version": "0.4.0",
+  "description": "Unreal Engine-aware index of your UE C++ project, its engine, and engine and Marketplace (Fab) plugins, with project memory that carries decisions across sessions, for any LLM in VS Code chat: MCP tools, an Unreal agent and an @unreal chat participant.",
   "publisher": "sidunrealde",
   "license": "MIT",
   "author": "Siddartha Gonnabattula",
@@ -28,7 +28,8 @@
     "mcp",
     "ai",
     "chat",
-    "code-index"
+    "code-index",
+    "memory"
   ],
   "categories": [
     "AI",
@@ -149,6 +150,11 @@
           "scope": "machine",
           "markdownDescription": "Where engine indexes are kept, about 300 MB per engine. Leave empty for the default: `%LOCALAPPDATA%\\unreal-llm-index` on Windows, `~/Library/Caches/unreal-llm-index` on macOS, `~/.cache/unreal-llm-index` on Linux."
         },
+        "unrealLlmIndex.memory.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Keep project memory in `.llm-memory/` next to the `.uproject`: notes (decisions, facts, gotchas, open tasks) that agents save and read across sessions. Commit the folder to share it with your team."
+        },
         "unrealLlmIndex.maxResultTokens": {
           "type": "number",
           "default": 8000,
@@ -175,7 +181,17 @@
         "name": "unreal",
         "fullName": "Unreal",
         "description": "Ask about this Unreal project, its engine and plugins",
-        "isSticky": true
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "save",
+            "description": "Save this conversation's decisions, facts, gotchas and open tasks to project memory"
+          },
+          {
+            "name": "memory",
+            "description": "Show project memory: open tasks, decisions, facts and gotchas"
+          }
+        ]
       }
     ],
     "chatAgents": [

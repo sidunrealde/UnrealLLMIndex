@@ -7,6 +7,7 @@ import { EngineProvider } from '../src/engineContext';
 import { EngineInstall, locateEngine } from '../src/engine/locate';
 import { syncEngineIndex } from '../src/engine/sync';
 import { ProjectIndex } from '../src/indexer';
+import { MemoryStore } from '../src/memory';
 import { elideToolResults, handleChatRequest, historyMessages, identifiersIn } from '../src/participant';
 import { limitsFor, ToolContext } from '../src/tools';
 import {
@@ -66,9 +67,9 @@ describe('@unreal participant', () => {
     let ctx: ToolContext;
     const token = { isCancellationRequested: false, onCancellationRequested: () => ({ dispose() {} }) } as unknown as vscode.CancellationToken;
 
-    const ask = (prompt: string, model: object, history: unknown[] = [], toolContext: ToolContext | null = ctx) => {
+    const ask = (prompt: string, model: object, history: unknown[] = [], toolContext: ToolContext | null = ctx, command?: string) => {
         const { out, stream } = fakeStream();
-        const request = { prompt, references: [], toolReferences: [], model } as unknown as vscode.ChatRequest;
+        const request = { prompt, command, references: [], toolReferences: [], model } as unknown as vscode.ChatRequest;
         const result = handleChatRequest(request, { history } as unknown as vscode.ChatContext, stream, token, { toolContext: () => toolContext ?? undefined, maxToolRounds: () => 3 });
         return result.then(r => ({ result: r, out }));
     };
@@ -96,7 +97,11 @@ describe('@unreal participant', () => {
         expect(out.markdown.join('')).toBe('Looking. It sets bPressedJump.');
         expect(out.progress).toEqual(['read_symbol({"name":"ACharacter::Jump"})']);
         expect(out.references.map(r => `${path.basename(r.uri.fsPath)}:${r.range.start.line + 1}`)).toEqual(['Character.h:15', 'Character.cpp:7']);
-        expect(result.metadata).toEqual({ rounds: 2, toolCalls: ['read_symbol({"name":"ACharacter::Jump"})'] });
+        expect(result.metadata).toEqual({
+            rounds: 2,
+            toolCalls: ['read_symbol({"name":"ACharacter::Jump"})'],
+            read: ['Engine/Source/Runtime/Engine/Classes/GameFramework/Character.h:15-16', 'Engine/Source/Runtime/Engine/Private/Character.cpp:7-11'],
+        });
 
         const [first, second] = requests;
         expect(textOf(first.messages[0])).toContain('# LLM index: SampleGame');
@@ -141,14 +146,73 @@ describe('@unreal participant', () => {
         expect(noProject.out.markdown.join('')).toContain('No Unreal Engine project');
     });
 
-    it('keeps earlier turns as text', () => {
+    it('keeps earlier turns as text, with what each answer looked at', () => {
         const messages = historyMessages({
-            history: [new ChatRequestTurn('Where is Jump?'), new ChatResponseTurn([new ChatResponseMarkdownPart('In '), new ChatResponseMarkdownPart('Character.cpp.')])],
+            history: [
+                new ChatRequestTurn('Where is Jump?'),
+                new ChatResponseTurn([new ChatResponseMarkdownPart('In '), new ChatResponseMarkdownPart('Character.cpp.')], { metadata: { read: ['Character.cpp:7-11', 'Character.h:15'] } }),
+                new ChatRequestTurn('And StopJumping?'),
+                new ChatResponseTurn([new ChatResponseMarkdownPart('Right below it.')]),
+            ],
         } as unknown as vscode.ChatContext);
         expect(messages.map(m => [m.role, textOf(m as unknown as LanguageModelChatMessage)])).toEqual([
             [1, 'Where is Jump?'],
-            [2, 'In Character.cpp.'],
+            [2, 'In Character.cpp.\n\n(Looked at: Character.cpp:7-11, Character.h:15)'],
+            [1, 'And StopJumping?'],
+            [2, 'Right below it.'],
         ]);
+    });
+
+    describe('with project memory', () => {
+        let memory: MemoryStore;
+        let memoryCtx: ToolContext;
+
+        beforeAll(() => {
+            memory = new MemoryStore(fs.mkdtempSync(path.join(os.tmpdir(), 'ue-llm-index-chat-memory-')));
+            memoryCtx = { ...ctx, memory };
+        });
+
+        afterAll(() => fs.rmSync(memory.dir, { recursive: true, force: true }));
+
+        it('/save turns the conversation into notes with the memory tools only, showing each one', async () => {
+            const { model, requests } = fakeModel([
+                () => [new LanguageModelToolCallPart('r', 'recall', {})],
+                () => [
+                    new LanguageModelToolCallPart('a', 'remember', { text: 'Jump only sets bPressedJump; movement reads it later.', about: ['ACharacter::Jump'] }),
+                    new LanguageModelToolCallPart('b', 'remember', { text: 'Add a double jump.', kind: 'task', about: ['ACharacter'] }),
+                ],
+                () => [new LanguageModelTextPart('Saved a fact and a task.')],
+            ]);
+            const history = [new ChatRequestTurn('How does Jump work?'), new ChatResponseTurn([new ChatResponseMarkdownPart('It sets a flag.')])];
+            const { out, result } = await ask('Focus on jumping', model, history, memoryCtx, 'save');
+
+            const first = requests[0];
+            expect(first.options.tools.map((t: any) => t.name).sort()).toEqual(['recall', 'remember', 'update_note']);
+            expect(textOf(first.messages.at(-1)!)).toMatch(/^Save what this conversation established to project memory[\s\S]*The user adds: Focus on jumping$/);
+            expect(first.messages.map(m => textOf(m))).toContain('It sets a flag.');
+
+            const text = out.markdown.join('');
+            expect(text).toMatch(/> 📝 Saved fact \[\w{6}\] to \.llm-memory\/\w{6}-jump-only-sets-bpressedjump-movement-reads\.md, about ACharacter::Jump\./);
+            expect(text).toContain('> 📝 Saved task [');
+            expect(text).toMatch(/Saved a fact and a task\.\n\n_2 notes saved to `\.llm-memory\/`\._$/);
+            expect(memory.list().map(n => n.kind).sort()).toEqual(['fact', 'task']);
+            expect(memory.list().every(n => n.source === '@unreal')).toBe(true);
+            expect(result.metadata?.toolCalls).toHaveLength(3);
+        });
+
+        it('/memory lists the notes without calling the model', async () => {
+            const { model, requests } = fakeModel([]);
+            const { out } = await ask('', model, [], memoryCtx, 'memory');
+            const text = out.markdown.join('');
+            expect(requests).toHaveLength(0);
+            expect(text).toMatch(/^\*\*Project memory\*\*: 2 notes in `\.llm-memory\/`\n\n\*\*Open tasks\*\*\n- \[\w{6}\] task \(open\), .*: Add a double jump\. — about ACharacter/);
+            expect(text).toContain('**Facts**\n- [');
+        });
+
+        it('says so when memory is off', async () => {
+            const { out } = await ask('', fakeModel([]).model, [], ctx, 'save');
+            expect(out.markdown.join('')).toContain('Project memory is off');
+        });
     });
 
     it('elides the oldest tool results when the conversation gets too long', () => {

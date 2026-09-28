@@ -6,13 +6,14 @@ import { writeIndex } from '../src/emit';
 import { ProjectIndex, qualifiedName } from '../src/indexer';
 import { renderFileOutline, renderIndex, renderModuleSummary } from '../src/outline';
 import { parseBuildCs, scanProject } from '../src/scan';
+import { copyFixture as copyFixtureFiles } from './fixtures';
 
 const FIXTURE = path.join(__dirname, 'fixtures/SampleGame');
 const tempDirs: string[] = [];
 
 function copyFixture(): string {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ue-llm-index-'));
-    fs.cpSync(FIXTURE, dir, { recursive: true });
+    copyFixtureFiles(FIXTURE, dir);
     tempDirs.push(dir);
     return dir;
 }

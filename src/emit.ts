@@ -25,6 +25,8 @@ export interface WriteOptions {
     outDir?: string;
     /** Engine lines for INDEX.md, from renderEngineSection. */
     engineSection?: string[];
+    /** Project memory lines for INDEX.md, from renderMemorySection. */
+    memorySection?: string[];
 }
 
 export function writeIndex(index: ProjectIndex, options: WriteOptions = {}): EmittedFile[] {
@@ -47,7 +49,7 @@ export function writeIndex(index: ProjectIndex, options: WriteOptions = {}): Emi
         emitted.push({ path: file, tokens: estimateTokens(content) });
     };
 
-    write('INDEX.md', renderIndex(index, { engineSection: options.engineSection }));
+    write('INDEX.md', renderIndex(index, { engineSection: options.engineSection, memorySection: options.memorySection }));
 
     for (const module of index.project.modules) {
         write(`modules/${safeFileName(module.name)}.md`, renderModuleSummary(index, module, { maxFiles: 0, outlineFiles: true }) + '\n');

@@ -13,17 +13,22 @@ The parser understands Unreal's conventions:
 
 It links each function declared in a header to its body in a `.cpp` file.
 
+**Project memory** carries what you and the model work out from one session to the next: decisions, facts about the code, gotchas and open tasks. Each note is linked to the code it's about and shows up when that code is read.
+
 ## Using it in VS Code chat
 
 Open a folder that contains a `.uproject`. The extension indexes the project straight away, then indexes its engine in the background. There are three ways to use the index in chat, with whichever model you pick:
 
-1. **Agent mode.** The **Unreal LLM Index** MCP server is registered with VS Code automatically. Its tools appear in the chat tools picker. They are read-only, so they run without confirmation prompts.
+1. **Agent mode.** The **Unreal LLM Index** MCP server is registered with VS Code automatically. Its tools appear in the chat tools picker. Lookup tools are read-only, so they run without confirmation prompts. Saving a memory note asks first, and you can choose **Always allow**.
 2. **The Unreal agent.** Pick **Unreal** in the chat's agent dropdown. It's set up with the index tools and instructions for using them. **Unreal LLM Index: Copy Unreal Agent to Workspace** writes an editable copy to `.github/agents/unreal.agent.md`.
-3. **`@unreal`.** Ask `@unreal how does ACharacter::Jump reach UCharacterMovementComponent?` in any chat mode. The participant does four things:
-   - starts from the project map
-   - calls the tools itself, showing each call
+3. **`@unreal`.** Ask `@unreal how does ACharacter::Jump reach UCharacterMovementComponent?` in any chat mode. The participant does five things:
+   - starts from the project map and project memory
+   - calls the tools itself, showing each call and each note it saves
    - lists the code it read as references
+   - reminds itself in later turns what earlier answers looked at
    - removes old tool results when the conversation nears the model's context limit
+
+   `@unreal /save` turns the conversation into memory notes, and `@unreal /memory` lists what's saved.
 
 ### Using your own model
 
@@ -64,11 +69,35 @@ Not indexed:
 
 A plugin counts as enabled through the `.uproject`, through its own `EnabledByDefault`, or as a dependency of an enabled plugin. `list_plugins` shows which plugins are enabled and why.
 
+## Project memory
+
+The index describes the code as it is. Memory keeps what isn't in the code: why something is done a certain way, what was decided, what to watch out for, and what's left to do. Without it, every new chat starts from zero.
+
+- **Saving notes.** The model saves notes with `remember` as it works. It records decisions made with you, non-obvious facts about the code, gotchas, and unfinished work. `@unreal /save` goes back over a conversation and saves what it established. You can also write notes yourself.
+- **Where notes appear.** At the start of every session, `get_index` and INDEX.md list the open tasks and the latest decisions. `read_symbol` and `get_file_outline` show notes about the code being read, and `find_symbol` marks symbols that have notes. `recall` searches all notes.
+- **Notes that may be outdated.** Each note is linked to symbols or files and remembers what that code looked like when the note was written. If the code changes, the note is marked *may be outdated*; if the code is gone, it says so. The model then checks the code and confirms the note (`update_note` with just the id), corrects it, or deletes it with `forget`.
+- **Shared by the team.** Notes live in `.llm-memory/`, next to the `.uproject`, one small Markdown file each:
+
+  ```md
+  ---
+  id: k3f9a2
+  kind: decision
+  about: ["UHouseSubsystem::Generate"]
+  fingerprints: {"UHouseSubsystem::Generate": "9c1e04a1b7d2"}
+  created: 2026-09-29T10:12:00.000Z
+  updated: 2026-09-29T10:12:00.000Z
+  source: "@unreal"
+  ---
+  Layout generation goes through UHouseSubsystem::Generate; never call FLayoutBuilder directly.
+  ```
+
+  Commit the folder so everyone's agents share the same notes. Separate files mean teammates adding notes never conflict. Files you write yourself work too; a file without the header is read as a fact.
+
 ## Tools
 
 | Tool | What it returns |
 |---|---|
-| `get_index()` | The project map: modules, dependencies, each file's types, and the engine and plugins in use. |
+| `get_index()` | The project map: modules, dependencies, each file's types, the engine and plugins in use, and project memory's open tasks and latest decisions. |
 | `get_module_outline(module, filter?)` | A module's classes with their function and property names. Works for project modules, engine modules (`"Engine"`, `"UMG"`) and plugins. Large modules list their folders until you pass a filter. |
 | `get_file_outline(path, type?)` | Every declaration in a file, with line numbers and `→ file:lines` links to implementations. Very long files get a compact outline. |
 | `find_symbol(query, kind?, scope?, limit?)` | Classes, functions, properties, enums or delegates matching a full or partial name, from the project and the engine. |
@@ -76,8 +105,12 @@ A plugin counts as enabled through the `.uproject`, through its own `EnabledByDe
 | `read_lines(path, start, end?)` | An exact line range of a project or engine file. |
 | `search_code(pattern, scope?, path_filter?, …)` | A regex search of the project, or of the engine code the project uses. Name a module, plugin or folder to search it instead. Engine searches use the ripgrep that ships with VS Code. |
 | `list_plugins(query?, include_disabled?)` | Project, engine and Marketplace plugins: whether each is enabled and why, its description and its modules. |
+| `remember(text, kind?, about?)` | Saves a note (`decision`, `fact`, `gotcha`, `task` or `summary`), linked to symbols or files. |
+| `recall(query?, about?, kind?, include_done?)` | Finds notes by words, by the code they're about (a class includes its members), or by kind, and flags the ones that may be outdated. |
+| `update_note(id, text?, kind?, about?, status?)` | Changes a note or marks a task done. With just the id, it confirms that a note flagged as outdated still holds. |
+| `forget(id)` | Deletes a note. |
 
-`scope` is `"project"`, `"engine"` or `"all"`. Paths can be any unique suffix, such as `Character.h` or `GameFramework/Character.h`. Engine paths start with `Engine/`. Tools only read files inside the project and the engine.
+`scope` is `"project"`, `"engine"` or `"all"`. Paths can be any unique suffix, such as `Character.h` or `GameFramework/Character.h`. Engine paths start with `Engine/`. Tools only read files inside the project and the engine; the memory tools write only in `.llm-memory/`.
 
 ## Files in `.llm-index/`
 
@@ -90,7 +123,7 @@ For agents that read files rather than calling tools:
 | `files/<Module>/<path>.md` | One source file's declarations with signatures, line numbers and links to implementations (about 200 tokens each). |
 | `symbols.json` | The project's full symbol table. |
 
-**Unreal LLM Index: Add Instructions to AGENTS.md** adds a marked section to `AGENTS.md` that points agents at the index. `.llm-index/` is generated, so add it to `.gitignore`.
+**Unreal LLM Index: Add Instructions to AGENTS.md** adds a marked section to `AGENTS.md` that points agents at the index. `.llm-index/` is generated, so add it to `.gitignore`. Commit `.llm-memory/`.
 
 ## Commands
 
@@ -111,6 +144,7 @@ For agents that read files rather than calling tools:
 | `unrealLlmIndex.engine.autoSync` | `onStartup` | `manual` to sync only when you run the command. |
 | `unrealLlmIndex.enginePath` | | The engine folder (the one containing `Engine/`), instead of `EngineAssociation`. |
 | `unrealLlmIndex.cacheDir` | OS cache | Where engine indexes are kept. |
+| `unrealLlmIndex.memory.enabled` | `true` | Keep project memory in `.llm-memory/`. |
 | `unrealLlmIndex.maxResultTokens` | `8000` | Largest tool result. With `0`, `@unreal` sizes results to the model. |
 | `unrealLlmIndex.maxReadLines` | `400` | Most lines per read. |
 | `unrealLlmIndex.chat.maxToolRounds` | `15` | Most rounds of tool calls per `@unreal` question. |
@@ -136,6 +170,7 @@ ue-llm-index tool    find_symbol '{"query":"ACharacter::Jump"}' --project <proje
 
 - `--engine <dir>` picks the engine; `--no-engine` indexes the project only.
 - `--cache-dir <dir>` moves the engine index cache.
+- `--memory-dir <dir>` moves project memory (default `<project>/.llm-memory`); `--no-memory` turns it off.
 - `--rg <path>` points engine searches at ripgrep.
 
 MCP clients that don't use VS Code's registry, such as Continue, Cline or Roo Code, can run the server from their own config:
@@ -169,7 +204,8 @@ node dist/agent-smoke.js --project D:/Projects/MyGame \
 
 ## Roadmap
 
-- **Session memory.** Notes and decisions that carry across chat sessions, attached to the symbols they're about.
+- **Find references and callers.** For example, "who calls `DoJump`?".
+- **Semantic search** with a local embedding model.
 
 ## Development
 

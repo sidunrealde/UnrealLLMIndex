@@ -5,12 +5,14 @@ import * as vscode from 'vscode';
 import { version } from '../package.json';
 import { MCP_SERVER_LABEL, mergeAgentsFile, renderAgentFile, renderAgentsSection } from './agentInstructions';
 import { INDEX_DIR, writeIndex } from './emit';
-import { EngineProvider, renderEngineSection } from './engineContext';
+import { EngineProvider } from './engineContext';
 import { EngineInstall, listEngineCandidates, locateEngine, versionLabel } from './engine/locate';
 import { defaultCacheDir, engineCachePaths } from './engine/paths';
 import { ProjectIndex } from './indexer';
+import { MEMORY_DIR, MemoryStore } from './memory';
 import { registerUnrealParticipant } from './participant';
 import { findRipgrep } from './search';
+import { indexSections } from './server';
 import { DEFAULT_READ_LINES, DEFAULT_RESULT_TOKENS, limitsFor } from './tools';
 
 const WATCH_GLOB = '{Source,Plugins}/**/*.{h,hpp,hh,inl,cpp,cc,cxx,c,cs,uplugin}';
@@ -28,6 +30,8 @@ interface IndexedProject {
     engine: EngineProvider;
     install?: EngineInstall;
     engineError?: string;
+    /** Notes in <project>/.llm-memory, unless memory is turned off. */
+    memory?: MemoryStore;
     disposables: vscode.Disposable[];
 }
 
@@ -72,8 +76,11 @@ export function activate(context: vscode.ExtensionContext) {
     const canWriteFiles = () => vscode.workspace.isTrusted !== false && config().get<boolean>('writeIndexFiles', true);
 
     function writeFiles(project: IndexedProject) {
-        writeIndex(project.index, { engineSection: renderEngineSection(project.engine.state(), project.index.project) });
+        writeIndex(project.index, indexSections({ project: project.index, engine: project.engine, memory: project.memory }));
     }
+
+    const memoryFor = (project: IndexedProject) =>
+        config().get<boolean>('memory.enabled', true) ? new MemoryStore(path.join(project.root, MEMORY_DIR)) : undefined;
 
     function build(project: IndexedProject, reason: string, force = false) {
         try {
@@ -235,7 +242,26 @@ export function activate(context: vscode.ExtensionContext) {
             watcher.onDidDelete(schedule);
             project.disposables.push(watcher);
         }
-        project.disposables.push({ dispose: () => clearTimeout(timer) });
+
+        // Notes change INDEX.md's memory section, whether a model or a person wrote them
+        let memoryTimer: NodeJS.Timeout | undefined;
+        const memoryChanged = () => {
+            clearTimeout(memoryTimer);
+            memoryTimer = setTimeout(() => {
+                if (project.memory && canWriteFiles()) {
+                    try {
+                        writeFiles(project);
+                    } catch (e: any) {
+                        log(`${project.name}: could not update INDEX.md — ${e.message}`);
+                    }
+                }
+            }, REBUILD_DELAY_MS);
+        };
+        const notes = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(project.root, `${MEMORY_DIR}/*.md`));
+        notes.onDidChange(memoryChanged);
+        notes.onDidCreate(memoryChanged);
+        notes.onDidDelete(memoryChanged);
+        project.disposables.push(notes, { dispose: () => clearTimeout(timer) }, { dispose: () => clearTimeout(memoryTimer) });
     }
 
     function workspaceFolderOf(project: IndexedProject): string {
@@ -267,7 +293,9 @@ export function activate(context: vscode.ExtensionContext) {
         for (const project of projects) {
             project.index.refresh(true);
             setupEngine(project);
-            build(project, 'initial build');
+            project.memory = memoryFor(project);
+            // Always write: files from an older version, or before the engine was indexed, may be out of date
+            build(project, 'initial build', true);
             watch(project);
         }
         updateContextKeys();
@@ -318,7 +346,8 @@ export function activate(context: vscode.ExtensionContext) {
                     const lines = config().get<number>('maxReadLines', DEFAULT_READ_LINES);
                     return projects.map(p => {
                         const engineArgs = p.install ? ['--engine', p.install.root] : config().get<boolean>('engine.enabled', true) ? [] : ['--no-engine'];
-                        const args = [cliPath, 'serve', p.root, '--no-write', '--cache-dir', cacheDir(), ...engineArgs];
+                        const memoryArgs = p.memory ? ['--memory-dir', p.memory.dir] : ['--no-memory'];
+                        const args = [cliPath, 'serve', p.root, '--no-write', '--cache-dir', cacheDir(), ...engineArgs, ...memoryArgs];
                         if (rgPath) {
                             args.push('--rg', rgPath);
                         }
@@ -345,7 +374,13 @@ export function activate(context: vscode.ExtensionContext) {
                     const configured = config().get<number>('maxResultTokens', DEFAULT_RESULT_TOKENS);
                     // 0 means "size results to the model"
                     const tokens = configured > 0 ? configured : Math.min(16_000, Math.max(2_000, Math.round(request.model.maxInputTokens * 0.06)));
-                    return { project: project.index, engine: project.engine, limits: limitsFor(tokens, config().get<number>('maxReadLines', DEFAULT_READ_LINES)), rgPath };
+                    return {
+                        project: project.index,
+                        engine: project.engine,
+                        memory: project.memory,
+                        limits: limitsFor(tokens, config().get<number>('maxReadLines', DEFAULT_READ_LINES)),
+                        rgPath,
+                    };
                 },
                 maxToolRounds: () => config().get<number>('chat.maxToolRounds', 15),
             }),
@@ -472,7 +507,15 @@ export function activate(context: vscode.ExtensionContext) {
                 resetEngines();
                 return;
             }
-            if (['registerMcpServer', 'maxResultTokens', 'maxReadLines'].some(key => e.affectsConfiguration(`unrealLlmIndex.${key}`))) {
+            if (e.affectsConfiguration('unrealLlmIndex.memory.enabled')) {
+                for (const project of projects) {
+                    project.memory = memoryFor(project);
+                    if (canWriteFiles()) {
+                        writeFiles(project);
+                    }
+                }
+            }
+            if (['registerMcpServer', 'maxResultTokens', 'maxReadLines', 'memory.enabled'].some(key => e.affectsConfiguration(`unrealLlmIndex.${key}`))) {
                 serversChanged.fire();
             }
             if (e.affectsConfiguration('unrealLlmIndex.writeIndexFiles') && canWriteFiles()) {

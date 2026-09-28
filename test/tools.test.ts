@@ -8,6 +8,7 @@ import { EngineProvider } from '../src/engineContext';
 import { locateEngine, EngineInstall } from '../src/engine/locate';
 import { syncEngineIndex } from '../src/engine/sync';
 import { ProjectIndex } from '../src/indexer';
+import { MemoryStore } from '../src/memory';
 import { createServer } from '../src/server';
 import { capOutput, limitsFor, runTool, toolJsonSchema, TOOLS } from '../src/tools';
 
@@ -24,9 +25,9 @@ describe('capOutput', () => {
     });
 });
 
-async function connect(index: ProjectIndex, engine: EngineProvider | undefined, limits = limitsFor()) {
+async function connect(index: ProjectIndex, engine: EngineProvider | undefined, limits = limitsFor(), memory?: MemoryStore) {
     const client = new Client({ name: 'test', version: '0' });
-    const server = createServer(index, { version: 'test', writeFiles: false, engine, limits });
+    const server = createServer(index, { version: 'test', writeFiles: false, engine, limits, memory });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     const call = async (name: string, args: Record<string, unknown> = {}) => {
@@ -58,12 +59,17 @@ describe('MCP tools', () => {
         fs.rmSync(cacheDir, { recursive: true, force: true });
     });
 
-    it('lists the eight tools, all read-only so VS Code runs them without asking', async () => {
+    it('lists the tools; lookups are read-only so VS Code runs them without asking, memory writes ask', async () => {
         const { tools } = await session.client.listTools();
-        expect(tools.map(t => t.name).sort()).toEqual(
-            ['find_symbol', 'get_file_outline', 'get_index', 'get_module_outline', 'list_plugins', 'read_lines', 'read_symbol', 'search_code'].sort(),
-        );
-        expect(tools.every(t => t.annotations?.readOnlyHint === true && t.annotations?.openWorldHint === false)).toBe(true);
+        const lookups = ['find_symbol', 'get_file_outline', 'get_index', 'get_module_outline', 'list_plugins', 'read_lines', 'read_symbol', 'recall', 'search_code'];
+        expect(tools.map(t => t.name).sort()).toEqual([...lookups, 'forget', 'remember', 'update_note'].sort());
+        for (const tool of tools) {
+            const readOnly = lookups.includes(tool.name);
+            expect(tool.annotations, tool.name).toMatchObject({ readOnlyHint: readOnly, openWorldHint: false });
+            if (!readOnly) {
+                expect(tool.annotations?.destructiveHint, tool.name).toBe(tool.name === 'forget');
+            }
+        }
     });
 
     it('get_index starts with the project heading and describes the engine', async () => {
@@ -179,6 +185,66 @@ describe('MCP tools', () => {
         } finally {
             await small.client.close();
         }
+    });
+});
+
+describe('project memory over MCP', () => {
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ue-llm-index-memtools-'));
+    const memoryDir = path.join(cacheDir, '.llm-memory');
+    const index = new ProjectIndex(FIXTURE);
+    let engine: EngineProvider;
+    let session: Awaited<ReturnType<typeof connect>>;
+    const call = (name: string, args: Record<string, unknown> = {}) => session.call(name, args);
+
+    beforeAll(async () => {
+        index.refresh(true);
+        const install = locateEngine('', FIXTURE, { override: FAKE_ENGINE }) as EngineInstall;
+        await syncEngineIndex({ engineRoot: install.root, cacheDir, jobs: 1 });
+        engine = new EngineProvider({ project: index, cacheDir, install });
+        session = await connect(index, engine, limitsFor(), new MemoryStore(memoryDir));
+    });
+
+    afterAll(async () => {
+        await session.client.close();
+        engine.dispose();
+        fs.rmSync(cacheDir, { recursive: true, force: true });
+    });
+
+    it('saves notes and shows them in the index and next to the code they are about', async () => {
+        expect((await call('get_index')).text).toContain('## Project memory\nNo notes yet.');
+        const decision = await call('remember', { text: 'Damage always goes through ApplyDamage so the health delegate fires.', kind: 'decision', about: ['ApplyDamage'] });
+        expect(decision.text).toMatch(/^Saved decision \[(\w{6})\] to \.llm-memory\/.*, about ASampleCharacter::ApplyDamage\.$/);
+        const id = /\[(\w{6})\]/.exec(decision.text)![1];
+        await call('remember', { text: 'Wire up the interaction prompt UI.', kind: 'task', about: ['ASampleCharacter'] });
+        await call('remember', { text: 'Jump only sets a flag; CharacterMovement does the work.', about: ['ACharacter::Jump'] });
+
+        const indexText = (await call('get_index')).text;
+        expect(indexText).toMatch(/## Project memory\n3 notes in \.llm-memory\//);
+        expect(indexText).toMatch(/Open tasks \(1\):\n- \[\w{6}\] task \(open\), .*: Wire up the interaction prompt UI\. — about ASampleCharacter/);
+
+        const read = (await call('read_symbol', { name: 'ASampleCharacter::ApplyDamage' })).text;
+        expect(read).toContain('Project memory notes about this code:\n');
+        expect(read).toContain(`\n- [${id}] decision, `);
+        expect(read).toContain('Damage always goes through ApplyDamage');
+        expect(read).toContain('Wire up the interaction prompt UI.');
+        expect((await call('read_symbol', { name: 'ACharacter::Jump' })).text).toContain('Jump only sets a flag');
+        expect((await call('get_file_outline', { path: 'SampleCharacter.h' })).text).toContain('Project memory notes about this code:');
+        expect((await call('find_symbol', { query: 'ApplyDamage', limit: 1 })).text).toMatch(/ASampleCharacter::ApplyDamage — .* \[1 note\]$/);
+    });
+
+    it('recalls, updates and forgets notes', async () => {
+        const tasks = (await call('recall', { kind: 'task' })).text;
+        expect(tasks).toMatch(/^1 note:\n- \[\w{6}\] task \(open\)/);
+        const id = /\[(\w{6})\]/.exec(tasks)![1];
+        expect((await call('update_note', { id, status: 'done' })).text).toMatch(/^Updated task \(done\) \[\w{6}\]: Wire up the interaction prompt UI\.$/);
+        expect((await call('recall', { kind: 'task' })).text).toMatch(/^No notes match/);
+        expect((await call('recall', { kind: 'task', include_done: true })).text).toContain('task (done)');
+        expect((await call('recall', { query: 'health delegate' })).text).toContain('Damage always goes through ApplyDamage');
+        expect((await call('recall', { about: 'ACharacter' })).text).toContain('Jump only sets a flag');
+
+        expect((await call('forget', { id })).text).toMatch(/^Deleted task \[\w{6}\]/);
+        expect(await call('forget', { id })).toMatchObject({ isError: true, text: expect.stringContaining('No note with id') });
+        expect(fs.readdirSync(memoryDir).filter(f => f !== 'README.md')).toHaveLength(2);
     });
 });
 
