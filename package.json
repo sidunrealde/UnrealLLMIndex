@@ -1,7 +1,7 @@
 {
   "name": "unreal-llm-index",
   "displayName": "Unreal LLM Index",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Unreal Engine-aware index of your UE C++ project, its engine and Marketplace (Fab) plugins for any LLM in VS Code chat: find code and its callers, keep project memory across sessions, and evaluate how well your model answers.",
   "publisher": "sidunrealde",
   "license": "MIT",
