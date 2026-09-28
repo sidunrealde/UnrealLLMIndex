@@ -1,3 +1,6 @@
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { version } from '../package.json';
@@ -6,6 +9,8 @@ import { EngineProvider } from './engineContext';
 import { EngineInstall, listEngineCandidates, locateEngine, versionLabel } from './engine/locate';
 import { canonicalRoot, defaultCacheDir, engineCachePaths } from './engine/paths';
 import { EngineBusyError, readEngineVersionAt, readIndexMeta, syncEngineIndex } from './engine/sync';
+import { compareReports, EVAL_DIR, EvalReport, generateQuestions, loadQuestions, QUESTIONS_FILE, renderQuestionsFile, writeReport } from './eval';
+import { runEvalWithEndpoint } from './evalCli';
 import { ProjectIndex } from './indexer';
 import { MEMORY_DIR, MemoryStore } from './memory';
 import { indexSections, startServer } from './server';
@@ -24,6 +29,10 @@ Usage:
                                                       Build or update the engine index (engine, engine and Marketplace plugins)
   ue-llm-index engine info [projectDir]               Show the engine index's location and size
   ue-llm-index tool <name> [json] [--project <dir>]   Run one tool and print its result (${TOOL_NAMES.join(', ')})
+  ue-llm-index eval init [projectDir] [--force]       Write a starter question set to ${EVAL_DIR}/${QUESTIONS_FILE}
+  ue-llm-index eval run [questions.json] --base-url <url>/v1 --model <name> [--api-key <key>] [--grade] [--label <text>]
+                                                      Answer each question with the model and the tools; write a report
+  ue-llm-index eval compare <a.json> <b.json>         Compare two evaluation reports
 
 Options:
   --engine <dir>              Engine install to use (the folder containing Engine/), instead of the project's EngineAssociation
@@ -34,11 +43,15 @@ Options:
   --rg <path>                 ripgrep for engine searches (default: $UE_LLM_INDEX_RG or rg on PATH)
   --max-result-tokens <n>     Size cap for each tool result (default 8000)
   --max-read-lines <n>        Lines per read (default 400)
+  --read-only-memory          serve: leave out the tools that change project memory
 
 projectDir is a folder containing a .uproject (or the .uproject itself).
 It defaults to $UE_LLM_INDEX_PROJECT, then the current directory.`;
 
-const VALUE_FLAGS = new Set(['out', 'engine', 'cache-dir', 'memory-dir', 'rg', 'max-result-tokens', 'max-read-lines', 'jobs', 'project']);
+const VALUE_FLAGS = new Set([
+    'out', 'engine', 'cache-dir', 'memory-dir', 'rg', 'max-result-tokens', 'max-read-lines', 'jobs', 'project',
+    'base-url', 'model', 'api-key', 'steps', 'label',
+]);
 
 function parseArgs(argv: string[]) {
     const positional: string[] = [];
@@ -182,6 +195,100 @@ async function engineCommand(sub: string | undefined, projectArg: string | undef
     }
 }
 
+/** Server options passed through to `serve` when evaluating. */
+const SERVER_VALUE_FLAGS = ['engine', 'cache-dir', 'memory-dir', 'rg', 'max-result-tokens', 'max-read-lines'];
+const SERVER_BOOLEAN_FLAGS = ['no-engine', 'no-memory'];
+
+async function evalCommand(sub: string | undefined, rest: string[], args: Args) {
+    switch (sub) {
+        case 'init': {
+            const index = new ProjectIndex(projectDirOf(rest[0] ?? args.value('project')));
+            index.refresh(true);
+            const engine = new EngineProvider({ project: index, cacheDir: args.value('cache-dir') ?? defaultCacheDir(), install: engineArg(args) });
+            try {
+                const out = args.value('out') ? path.resolve(args.value('out')!) : path.join(index.root, EVAL_DIR, QUESTIONS_FILE);
+                if (fs.existsSync(out) && !args.flags.has('force')) {
+                    throw new Error(`${out} already exists. Pass --force to replace it, or --out to write another file.`);
+                }
+                const questions = await generateQuestions({ project: index, engine, memory: memoryFor(args, index), limits: limitsFor(), rgPath: args.value('rg') ?? findRipgrep() });
+                fs.mkdirSync(path.dirname(out), { recursive: true });
+                fs.writeFileSync(out, renderQuestionsFile(questions));
+                console.log(`Wrote ${questions.length} generated questions and one example to edit: ${out}`);
+            } finally {
+                engine.dispose();
+            }
+            return;
+        }
+        case 'run': {
+            const projectArg = args.value('project');
+            const file = path.resolve(rest[0] ?? path.join(new ProjectIndex(projectDirOf(projectArg)).root, EVAL_DIR, QUESTIONS_FILE));
+            const questions = loadQuestions(file);
+            // By default the project is the folder that holds .llm-eval/
+            const projectDir = projectArg ?? (path.basename(path.dirname(file)) === EVAL_DIR ? path.dirname(path.dirname(file)) : projectDirOf(undefined));
+            const root = new ProjectIndex(projectDir).root;
+            const baseUrl = args.value('base-url') ?? process.env.OPENAI_BASE_URL;
+            const model = args.value('model') ?? process.env.OPENAI_MODEL;
+            if (!baseUrl || !model) {
+                throw new Error(
+                    'Pass --base-url and --model, or set OPENAI_BASE_URL and OPENAI_MODEL. To use a model set up in VS Code chat instead, run "Unreal LLM Index: Run Evaluation" there.',
+                );
+            }
+            const serverArgs = [process.argv[1], 'serve', root, '--no-write', '--read-only-memory'];
+            for (const flag of SERVER_VALUE_FLAGS) {
+                if (args.value(flag)) {
+                    serverArgs.push(`--${flag}`, args.value(flag)!);
+                }
+            }
+            SERVER_BOOLEAN_FLAGS.filter(flag => args.flags.has(flag)).forEach(flag => serverArgs.push(`--${flag}`));
+            const client = new Client({ name: 'ue-llm-index-eval', version });
+            await client.connect(new StdioClientTransport({ command: process.execPath, args: serverArgs, stderr: 'ignore' }));
+            try {
+                console.log(`Evaluating ${model} on ${questions.length} questions from ${file}\n`);
+                const report = await runEvalWithEndpoint({
+                    client,
+                    baseUrl,
+                    model,
+                    apiKey: args.value('api-key') ?? process.env.OPENAI_API_KEY,
+                    questions,
+                    project: root,
+                    grade: args.flags.has('grade'),
+                    maxSteps: Number(args.value('steps')) || undefined,
+                    config: {
+                        extension: version,
+                        ...(args.value('label') ? { label: args.value('label')! } : {}),
+                        engine: !args.flags.has('no-engine'),
+                        memory: !args.flags.has('no-memory'),
+                        maxResultTokens: Number(args.value('max-result-tokens')) || 8000,
+                    },
+                    log: line => console.log(line),
+                });
+                const written = writeReport(args.value('out') ? path.resolve(args.value('out')!) : path.join(root, EVAL_DIR, 'results'), report);
+                console.log(`\n${report.summary.passed} of ${report.summary.questions} passed. Report: ${written}`);
+            } finally {
+                await client.close();
+            }
+            return;
+        }
+        case 'compare': {
+            const [a, b] = rest;
+            if (!a || !b) {
+                throw new Error('Pass two report files: ue-llm-index eval compare <a.json> <b.json>');
+            }
+            const read = (file: string) => JSON.parse(fs.readFileSync(file, 'utf8')) as EvalReport;
+            const text = compareReports(read(a), read(b));
+            if (args.value('out')) {
+                fs.writeFileSync(args.value('out')!, text);
+                console.log(`Wrote ${args.value('out')}`);
+            } else {
+                console.log(text);
+            }
+            return;
+        }
+        default:
+            throw new Error(`Unknown eval command "${sub ?? ''}". Use init, run or compare.`);
+    }
+}
+
 async function main() {
     const args = parseArgs(process.argv.slice(2));
     if (args.flags.has('version')) {
@@ -224,12 +331,16 @@ async function main() {
                 engine: engineArg(args),
                 cacheDir,
                 memoryDir: args.flags.has('no-memory') ? null : args.value('memory-dir'),
+                readOnlyMemory: args.flags.has('read-only-memory'),
                 rgPath: args.value('rg'),
                 limits: limits(args),
             });
             break;
         case 'engine':
             await engineCommand(rest[0], rest[1], args);
+            break;
+        case 'eval':
+            await evalCommand(rest[0], rest.slice(1), args);
             break;
         case 'tool': {
             const [name, json] = rest;

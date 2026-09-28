@@ -17,6 +17,8 @@ export interface ParticipantDeps {
     /** Tools for the project the request is about, or undefined when no Unreal project is open. */
     toolContext(request: vscode.ChatRequest): ToolContext | undefined;
     maxToolRounds(): number;
+    /** Leave out the tools that change project memory, e.g. for evaluation runs. */
+    readOnlyMemory?: boolean;
 }
 
 type Message = vscode.LanguageModelChatMessage;
@@ -227,7 +229,7 @@ export async function handleChatRequest(
         ...historyMessages(context),
         vscode.LanguageModelChatMessage.User(prompt),
     ];
-    const tools: vscode.LanguageModelChatTool[] = TOOLS.filter(t => command !== 'save' || MEMORY_TOOLS.has(t.name)).map(t => ({
+    const tools: vscode.LanguageModelChatTool[] = TOOLS.filter(t => (command !== 'save' || MEMORY_TOOLS.has(t.name)) && !(deps.readOnlyMemory && WRITE_TOOLS.has(t.name))).map(t => ({
         name: t.name,
         description: t.description,
         inputSchema: toolJsonSchema(t),
@@ -236,16 +238,19 @@ export async function handleChatRequest(
     const calls: string[] = [];
     const saved: string[] = [];
     let useTools = true;
+    let largestPrompt = 0;
     const maxRounds = Math.max(1, deps.maxToolRounds());
     const finish = (rounds: number): vscode.ChatResult => {
         if (command === 'save') {
             stream.markdown(saved.length ? `\n\n_${saved.length} note${saved.length > 1 ? 's' : ''} saved to \`${MEMORY_DIR}/\`._` : '\n\n_Nothing new was saved._');
         }
-        return { metadata: { rounds, toolCalls: calls, read: read.slice(0, 30) } };
+        // Estimated: the chat API doesn't report token counts
+        return { metadata: { rounds, toolCalls: calls, read: read.slice(0, 30), maxPromptTokens: Math.round(largestPrompt / 3.5) } };
     };
 
     for (let round = 1; round <= maxRounds; round++) {
         elideToolResults(messages, results, budget * ELIDE_AT);
+        largestPrompt = Math.max(largestPrompt, messages.reduce((n, m) => n + messageChars(m), 0));
         let response: vscode.LanguageModelChatResponse;
         try {
             response = await model.sendRequest(messages, useTools ? { tools, justification: 'Look up code in the Unreal LLM Index' } : {}, token);

@@ -1,8 +1,8 @@
 {
   "name": "unreal-llm-index",
   "displayName": "Unreal LLM Index",
-  "version": "0.4.0",
-  "description": "Unreal Engine-aware index of your UE C++ project, its engine, and engine and Marketplace (Fab) plugins, with project memory that carries decisions across sessions, for any LLM in VS Code chat: MCP tools, an Unreal agent and an @unreal chat participant.",
+  "version": "0.5.0",
+  "description": "Unreal Engine-aware index of your UE C++ project, its engine and Marketplace (Fab) plugins for any LLM in VS Code chat: find code and its callers, keep project memory across sessions, and evaluate how well your model answers.",
   "publisher": "sidunrealde",
   "license": "MIT",
   "author": "Siddartha Gonnabattula",
@@ -29,7 +29,9 @@
     "ai",
     "chat",
     "code-index",
-    "memory"
+    "memory",
+    "references",
+    "evaluation"
   ],
   "categories": [
     "AI",
@@ -104,6 +106,21 @@
       {
         "command": "unrealLlmIndex.addAgentsInstructions",
         "title": "Add Instructions to AGENTS.md",
+        "category": "Unreal LLM Index"
+      },
+      {
+        "command": "unrealLlmIndex.runEvaluation",
+        "title": "Run Evaluation",
+        "category": "Unreal LLM Index"
+      },
+      {
+        "command": "unrealLlmIndex.createEvaluation",
+        "title": "Create Evaluation Questions",
+        "category": "Unreal LLM Index"
+      },
+      {
+        "command": "unrealLlmIndex.compareEvaluations",
+        "title": "Compare Evaluation Results",
         "category": "Unreal LLM Index"
       }
     ],
