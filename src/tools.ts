@@ -5,6 +5,7 @@ import { ENGINE_TOPS } from './scan';
 import { EngineHandle, EngineProvider, EngineState, renderEngineSection } from './engineContext';
 import { ProjectIndex, qualifiedName } from './indexer';
 import { isHeader, renderFileOutline, renderIndex, renderModuleSummary } from './outline';
+import { checkNote, MEMORY_DIR, MemoryStore, NOTE_KINDS, noteLine, notesAbout, renderMemorySection, resolveAnchors } from './memory';
 import { ripgrep, searchFiles, SearchHit, toRegex } from './search';
 import { CodeSymbol, PluginInfo, SourceIndex, SourceRange, SymbolKind } from './types';
 
@@ -29,8 +30,12 @@ export interface ToolContext {
     limits: OutputLimits;
     /** ripgrep, for searching engine code. */
     rgPath?: string;
-    /** Called for each source range a tool returns, e.g. to show references in chat. */
-    onRead?(absolutePath: string, startLine: number, endLine: number): void;
+    /** Project memory; without it, the memory tools report that memory is off. */
+    memory?: MemoryStore;
+    /** Recorded on notes this context saves: "@unreal" or "agent". */
+    source?: string;
+    /** Called for each source range a tool returns, e.g. to show references in chat. `label` is "path:start-end" as shown. */
+    onRead?(absolutePath: string, startLine: number, endLine: number, label: string): void;
 }
 
 export interface ToolDef<S extends z.ZodRawShape = z.ZodRawShape> {
@@ -38,6 +43,10 @@ export interface ToolDef<S extends z.ZodRawShape = z.ZodRawShape> {
     title: string;
     description: string;
     input: S;
+    /** Tools that only read run without confirmation in VS Code. Defaults to true. */
+    readOnly?: boolean;
+    /** Tools that delete something. */
+    destructive?: boolean;
     run(args: z.infer<z.ZodObject<S>>, ctx: ToolContext): string | Promise<string>;
 }
 
@@ -99,8 +108,9 @@ function numberedRange(ctx: ToolContext, index: SourceIndex, range: SourceRange)
     const end = Math.min(range.endLine, lines.length, start + ctx.limits.maxReadLines - 1);
     const body = lines.slice(start - 1, end).map((l, i) => `${String(start + i).padStart(4)}| ${l}`).join('\n');
     const clipped = end < range.endLine ? ` (first ${end - start + 1} of ${range.endLine - start + 1} lines; use read_lines for the rest)` : '';
-    ctx.onRead?.(index.absolutePath(range.file), start, end);
-    return `// ${index.shortPath(range.file)}:${start === end ? start : `${start}-${end}`}${clipped}\n${body}`;
+    const label = `${index.shortPath(range.file)}:${start === end ? start : `${start}-${end}`}`;
+    ctx.onRead?.(index.absolutePath(range.file), start, end, label);
+    return `// ${label}${clipped}\n${body}`;
 }
 
 function symbolLine(index: SourceIndex, s: CodeSymbol): string {
@@ -198,16 +208,51 @@ function filesUnder(index: EngineIndex, dirs: string[]): string[] {
 
 const hitLine = (index: SourceIndex | undefined, hit: SearchHit) => `${index ? index.shortPath(hit.path) : hit.path}:${hit.line}: ${hit.text}`;
 
+const MEMORY_OFF = 'Project memory is off for this project (the unrealLlmIndex.memory.enabled setting, or --no-memory).';
+
+/** Notes about the given symbols or files, to append to a tool result; empty when there are none. */
+function notesSection(ctx: ToolContext, targets: string[], options: { members?: boolean; max?: number } = {}): string {
+    if (!ctx.memory) {
+        return '';
+    }
+    const notes = notesAbout(ctx.memory.list(), targets, { members: options.members });
+    if (!notes.length) {
+        return '';
+    }
+    const max = options.max ?? 8;
+    const more = notes.length > max ? `\n… ${notes.length - max} more; recall(about) lists them.` : '';
+    return `\n\nProject memory notes about this code:\n${notes.slice(0, max).map(n => noteLine(ctx, n, 300)).join('\n')}${more}`;
+}
+
+/** How many notes are about each symbol or file, by lower-case key. */
+function noteCounts(ctx: ToolContext): Map<string, number> {
+    const counts = new Map<string, number>();
+    for (const note of ctx.memory?.list() ?? []) {
+        for (const anchor of note.about) {
+            counts.set(anchor.toLowerCase(), (counts.get(anchor.toLowerCase()) ?? 0) + 1);
+        }
+    }
+    return counts;
+}
+
+function requireMemory(ctx: ToolContext): MemoryStore {
+    if (!ctx.memory) {
+        throw new Error(MEMORY_OFF);
+    }
+    return ctx.memory;
+}
+
 export const TOOLS: ToolDef<any>[] = [
     defineTool({
         name: 'get_index',
         title: 'Project index',
         description:
-            'Start here. Returns the project map: modules with their dependencies, every source file with the types it declares, and the engine version and plugins the project uses.',
+            'Start here. Returns the project map: modules with their dependencies, every source file with the types it declares, the engine version and plugins the project uses, and project memory (open tasks and recent decisions from earlier sessions).',
         input: {},
         run: (_args, ctx) => {
             const engineSection = ctx.engine ? renderEngineSection(engineState(ctx), ctx.project.project) : undefined;
-            return capOutput(renderIndex(ctx.project, { engineSection }), 'Use get_module_outline(module) for one module.', ctx.limits.maxChars * 1.5);
+            const memorySection = ctx.memory ? renderMemorySection(ctx, ctx.memory) : undefined;
+            return capOutput(renderIndex(ctx.project, { engineSection, memorySection }), 'Use get_module_outline(module) for one module.', ctx.limits.maxChars * 1.5);
         },
     }),
 
@@ -263,7 +308,8 @@ export const TOOLS: ToolDef<any>[] = [
         },
         run: ({ path, type }, ctx) => {
             const { index, rel } = locateFile(ctx, path);
-            return capOutput(renderFileOutline(index, rel, { type, maxChars: ctx.limits.maxChars }), 'Pass type, or use read_symbol or read_lines for details.', ctx.limits.maxChars);
+            const outline = capOutput(renderFileOutline(index, rel, { type, maxChars: ctx.limits.maxChars }), 'Pass type, or use read_symbol or read_lines for details.', ctx.limits.maxChars);
+            return outline + notesSection(ctx, [rel, ...index.symbolsInFile(rel).map(qualifiedName)]);
         },
     }),
 
@@ -287,7 +333,12 @@ export const TOOLS: ToolDef<any>[] = [
             if (!hits.length) {
                 return `No symbols match "${query}". Try a shorter query, another scope, or search_code.${notice}`;
             }
-            return capOutput(hits.map(h => symbolLine(h.index, h.symbol)).join('\n') + notice, 'Narrow the query or pass kind.', ctx.limits.maxChars);
+            const counts = noteCounts(ctx);
+            const lines = hits.map(h => {
+                const notes = counts.get(qualifiedName(h.symbol).toLowerCase());
+                return symbolLine(h.index, h.symbol) + (notes ? ` [${notes} note${notes > 1 ? 's' : ''}]` : '');
+            });
+            return capOutput(lines.join('\n') + notice, 'Narrow the query or pass kind.', ctx.limits.maxChars);
         },
     }),
 
@@ -339,11 +390,14 @@ export const TOOLS: ToolDef<any>[] = [
             const span = first.endLine - first.startLine + 1;
             if (['class', 'struct', 'interface', 'enum'].includes(first.kind) && span > ctx.limits.maxReadLines) {
                 const outline = renderFileOutline(index, first.file, { type: qualifiedName(first), maxChars: ctx.limits.maxChars });
-                return capOutput(
-                    `${qualifiedName(first)} spans ${span} lines (${index.shortPath(first.file)}:${first.startLine}-${first.endLine}), more than one read, so here is its outline. ` +
-                        `Use read_symbol("${qualifiedName(first)}::<member>") or read_lines for parts.\n\n${outline}`,
-                    'Use read_symbol for one member.',
-                    ctx.limits.maxChars,
+                const notes = notesSection(ctx, [qualifiedName(first)], { members: true });
+                return (
+                    capOutput(
+                        `${qualifiedName(first)} spans ${span} lines (${index.shortPath(first.file)}:${first.startLine}-${first.endLine}), more than one read, so here is its outline. ` +
+                            `Use read_symbol("${qualifiedName(first)}::<member>") or read_lines for parts.\n\n${outline}`,
+                        'Use read_symbol for one member.',
+                        ctx.limits.maxChars,
+                    ) + notes
                 );
             }
             const ranges = new Map<string, SourceRange>();
@@ -354,7 +408,9 @@ export const TOOLS: ToolDef<any>[] = [
                 }
             }
             const text = [...ranges.values()].map(r => numberedRange(ctx, index, r)).join('\n\n');
-            return capOutput(text, 'Use read_lines(path, start, end) for a specific part.', ctx.limits.maxChars);
+            // Notes about the symbol itself and the class it belongs to
+            const notes = notesSection(ctx, [qualifiedName(first), first.container ?? ''], { members: ['class', 'struct', 'interface', 'enum'].includes(first.kind) });
+            return capOutput(text, 'Use read_lines(path, start, end) for a specific part.', ctx.limits.maxChars) + notes;
         },
     }),
 
@@ -466,6 +522,108 @@ export const TOOLS: ToolDef<any>[] = [
             const header = `${shown.length} ${scopeText}${query ? ` matching "${query}"` : ''}:`;
             const notice = 'handle' in state ? '' : `\n(Engine plugins not listed: ${state.message})`;
             return capOutput([header, ...shown.map(p => pluginLine(p, enabled.get(p.name.toLowerCase())))].join('\n') + notice, 'Pass a query to narrow the list.', ctx.limits.maxChars);
+        },
+    }),
+
+    defineTool({
+        name: 'remember',
+        title: 'Remember',
+        readOnly: false,
+        description:
+            'Save a note to project memory so later sessions (and teammates) know it: a decision made, a non-obvious fact about the code, a gotcha, or an unfinished task. ' +
+            'Keep it to one or two self-contained sentences and attach it to the symbols or files it is about. Check recall first to avoid duplicates.',
+        input: {
+            text: z.string().min(1).describe('The note: one or two self-contained sentences'),
+            kind: z.enum(NOTE_KINDS).optional().describe('decision, fact, gotcha, task or summary (default fact)'),
+            about: z.array(z.string()).optional().describe('Symbols or files it is about, e.g. ["AHouseActor::Rebuild", "HouseActor.cpp"]'),
+        },
+        run: ({ text, kind, about }, ctx) => {
+            const store = requireMemory(ctx);
+            const anchors = resolveAnchors(ctx, about ?? []);
+            const note = store.add({ text, kind: kind ?? 'fact', about: anchors.about, fingerprints: anchors.fingerprints, source: ctx.source });
+            const problems = anchors.notes.length ? ` Kept as plain tags: ${anchors.notes.join('; ')}.` : '';
+            return `Saved ${note.kind} [${note.id}] to ${MEMORY_DIR}/${note.file}${note.about.length ? `, about ${note.about.join(', ')}` : ''}.${problems}`;
+        },
+    }),
+
+    defineTool({
+        name: 'recall',
+        title: 'Recall',
+        description:
+            'Search project memory: decisions, facts, gotchas and tasks saved in earlier sessions. Filter by words, by a symbol or file (notes about a class include notes about its members), or by kind. ' +
+            'Each note shows whether the code it is about changed since it was written.',
+        input: {
+            query: z.string().optional().describe('Words the note must contain'),
+            about: z.string().optional().describe('A symbol or file, e.g. "AHouseActor" or "HouseActor.cpp"'),
+            kind: z.enum(NOTE_KINDS).optional().describe('Only notes of this kind'),
+            include_done: z.boolean().optional().describe('Include finished tasks (default false)'),
+            limit: z.number().int().min(1).max(50).optional().describe('Maximum notes (default 20)'),
+        },
+        run: ({ query, about, kind, include_done, limit }, ctx) => {
+            const store = requireMemory(ctx);
+            let notes = store.list();
+            if (about?.trim()) {
+                const resolved = resolveAnchors(ctx, [about]).about;
+                notes = notesAbout(notes, [...resolved, about], { members: true });
+            }
+            const words = (query ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+            notes = notes.filter(
+                n =>
+                    (!kind || n.kind === kind) &&
+                    (include_done || n.status !== 'done') &&
+                    words.every(w => `${n.text} ${n.about.join(' ')}`.toLowerCase().includes(w)),
+            );
+            if (!notes.length) {
+                const total = store.list().length;
+                return total ? `No notes match. Project memory has ${total} notes; try fewer words or no filter.` : 'Project memory is empty.';
+            }
+            const max = limit ?? 20;
+            const more = notes.length > max ? `\n… ${notes.length - max} more; narrow the search.` : '';
+            return capOutput(`${notes.length} note${notes.length > 1 ? 's' : ''}:\n${notes.slice(0, max).map(n => noteLine(ctx, n)).join('\n')}${more}`, 'Narrow the search.', ctx.limits.maxChars);
+        },
+    }),
+
+    defineTool({
+        name: 'update_note',
+        title: 'Update note',
+        readOnly: false,
+        description:
+            'Change a project memory note: its text, kind, what it is about, or a task\'s status (mark it done). Called with only an id, it confirms that a note flagged as possibly outdated still holds for the current code.',
+        input: {
+            id: z.string().describe('The note id, e.g. "k3f9a2"'),
+            text: z.string().optional().describe('New text'),
+            kind: z.enum(NOTE_KINDS).optional().describe('New kind'),
+            about: z.array(z.string()).optional().describe('New symbols or files it is about (replaces the old ones)'),
+            status: z.enum(['open', 'done']).optional().describe('For tasks'),
+        },
+        run: ({ id, text, kind, about, status }, ctx) => {
+            const store = requireMemory(ctx);
+            const current = store.get(id);
+            if (!current) {
+                throw new Error(`No note with id "${id}". recall lists the notes and their ids.`);
+            }
+            // Re-fingerprint the anchors either way: the note now describes the current code
+            const anchors = resolveAnchors(ctx, about ?? current.about);
+            const wasOutdated = checkNote(ctx, current);
+            const note = store.update(current.id, { text, kind, status, about: anchors.about, fingerprints: anchors.fingerprints });
+            const confirmed = !text && !kind && !about && !status && (wasOutdated.changed.length || wasOutdated.missing.length) ? ' Confirmed against the current code.' : '';
+            const problems = anchors.notes.length ? ` Kept as plain tags: ${anchors.notes.join('; ')}.` : '';
+            return `Updated ${note.kind}${note.status ? ` (${note.status})` : ''} [${note.id}]: ${note.text}${confirmed}${problems}`;
+        },
+    }),
+
+    defineTool({
+        name: 'forget',
+        title: 'Forget',
+        readOnly: false,
+        destructive: true,
+        description: 'Delete a project memory note that is wrong or no longer useful.',
+        input: {
+            id: z.string().describe('The note id, e.g. "k3f9a2"'),
+        },
+        run: ({ id }, ctx) => {
+            const note = requireMemory(ctx).remove(id);
+            return `Deleted ${note.kind} [${note.id}]: ${note.text}`;
         },
     }),
 ];

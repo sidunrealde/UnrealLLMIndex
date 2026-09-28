@@ -2,12 +2,13 @@ import * as os from 'os';
 import * as path from 'path';
 import { version } from '../package.json';
 import { writeIndex } from './emit';
-import { EngineProvider, renderEngineSection } from './engineContext';
+import { EngineProvider } from './engineContext';
 import { EngineInstall, listEngineCandidates, locateEngine, versionLabel } from './engine/locate';
 import { canonicalRoot, defaultCacheDir, engineCachePaths } from './engine/paths';
 import { EngineBusyError, readEngineVersionAt, readIndexMeta, syncEngineIndex } from './engine/sync';
 import { ProjectIndex } from './indexer';
-import { startServer } from './server';
+import { MEMORY_DIR, MemoryStore } from './memory';
+import { indexSections, startServer } from './server';
 import { findRipgrep } from './search';
 import { limitsFor, runTool, TOOL_NAMES } from './tools';
 
@@ -28,6 +29,8 @@ Options:
   --engine <dir>              Engine install to use (the folder containing Engine/), instead of the project's EngineAssociation
   --no-engine                 Index and serve the project only
   --cache-dir <dir>           Where engine indexes are kept (default ${defaultCacheDir()})
+  --memory-dir <dir>          Project memory folder (default <project>/${MEMORY_DIR})
+  --no-memory                 Turn project memory off
   --rg <path>                 ripgrep for engine searches (default: $UE_LLM_INDEX_RG or rg on PATH)
   --max-result-tokens <n>     Size cap for each tool result (default 8000)
   --max-read-lines <n>        Lines per read (default 400)
@@ -35,7 +38,7 @@ Options:
 projectDir is a folder containing a .uproject (or the .uproject itself).
 It defaults to $UE_LLM_INDEX_PROJECT, then the current directory.`;
 
-const VALUE_FLAGS = new Set(['out', 'engine', 'cache-dir', 'rg', 'max-result-tokens', 'max-read-lines', 'jobs', 'project']);
+const VALUE_FLAGS = new Set(['out', 'engine', 'cache-dir', 'memory-dir', 'rg', 'max-result-tokens', 'max-read-lines', 'jobs', 'project']);
 
 function parseArgs(argv: string[]) {
     const positional: string[] = [];
@@ -90,6 +93,11 @@ function requireEngine(args: Args, projectArg?: string): EngineInstall {
         throw new Error(found.error);
     }
     return found;
+}
+
+/** Project memory for a command: --memory-dir, <project>/.llm-memory, or none with --no-memory. */
+function memoryFor(args: Args, index: ProjectIndex): MemoryStore | undefined {
+    return args.flags.has('no-memory') ? undefined : new MemoryStore(args.value('memory-dir') ?? path.join(index.root, MEMORY_DIR));
 }
 
 function limits(args: Args) {
@@ -194,7 +202,7 @@ async function main() {
             index.refresh(true);
             const engine = new EngineProvider({ project: index, cacheDir, install: engineArg(args) });
             const out = args.value('out') ? path.resolve(args.value('out')!) : undefined;
-            const emitted = writeIndex(index, { outDir: out, engineSection: renderEngineSection(engine.state(), index.project) });
+            const emitted = writeIndex(index, { outDir: out, ...indexSections({ project: index, engine, memory: memoryFor(args, index) }) });
             console.log(`Indexed ${index.project.name}: ${index.indexedFiles().length} files, ${index.allSymbols().length} symbols in ${Date.now() - started} ms`);
             const tokens = (n: number) => `~${n.toLocaleString('en-US')} tokens`;
             const outlines = emitted.filter(f => f.path.includes(`${path.sep}files${path.sep}`));
@@ -215,6 +223,7 @@ async function main() {
                 writeFiles: !args.flags.has('no-write'),
                 engine: engineArg(args),
                 cacheDir,
+                memoryDir: args.flags.has('no-memory') ? null : args.value('memory-dir'),
                 rgPath: args.value('rg'),
                 limits: limits(args),
             });
@@ -227,7 +236,14 @@ async function main() {
             const index = new ProjectIndex(projectDirOf(args.value('project')));
             index.refresh(true);
             const engine = new EngineProvider({ project: index, cacheDir, install: engineArg(args) });
-            const result = await runTool(name ?? '', json ? JSON.parse(json) : {}, { project: index, engine, limits: limits(args), rgPath: args.value('rg') ?? findRipgrep() });
+            const result = await runTool(name ?? '', json ? JSON.parse(json) : {}, {
+                project: index,
+                engine,
+                memory: memoryFor(args, index),
+                source: 'user',
+                limits: limits(args),
+                rgPath: args.value('rg') ?? findRipgrep(),
+            });
             console.log(result.text);
             process.exitCode = result.isError ? 1 : 0;
             engine.dispose();

@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as vscode from 'vscode';
 import { TOOL_AGENT_PROMPT } from './agentInstructions';
+import { MEMORY_DIR, MemoryNote, MemoryStore, noteLine } from './memory';
 import { capOutput, runTool, ToolContext, toolJsonSchema, TOOLS } from './tools';
 
 export const PARTICIPANT_ID = 'unrealLlmIndex.unreal';
@@ -87,8 +88,11 @@ export function historyMessages(context: vscode.ChatContext): Message[] {
                 .filter((p): p is vscode.ChatResponseMarkdownPart => p instanceof vscode.ChatResponseMarkdownPart)
                 .map(p => p.value.value)
                 .join('');
-            if (text) {
-                messages.push(vscode.LanguageModelChatMessage.Assistant(text));
+            // Tool results aren't kept between turns; list what was read so it can be fetched again
+            const read: unknown = turn.result.metadata?.read;
+            const looked = Array.isArray(read) && read.length ? `\n\n(Looked at: ${read.join(', ')})` : '';
+            if (text || looked) {
+                messages.push(vscode.LanguageModelChatMessage.Assistant(text + looked));
             }
         }
     }
@@ -140,6 +144,41 @@ function errorResult(e: unknown, stream: vscode.ChatResponseStream): vscode.Chat
     return { errorDetails: { message } };
 }
 
+/** Everything in project memory, open tasks first: the `/memory` command. */
+export function renderMemoryOverview(ctx: ToolContext, store: MemoryStore): string {
+    const notes = store.list();
+    if (!notes.length) {
+        return `Project memory is empty. Notes appear in \`${MEMORY_DIR}/\` when the model saves decisions, facts, gotchas and tasks, or when you run \`@unreal /save\`.`;
+    }
+    const groups: [string, MemoryNote[]][] = [
+        ['Open tasks', notes.filter(n => n.kind === 'task' && n.status !== 'done')],
+        ['Decisions', notes.filter(n => n.kind === 'decision')],
+        ['Gotchas', notes.filter(n => n.kind === 'gotcha')],
+        ['Facts', notes.filter(n => n.kind === 'fact')],
+        ['Summaries', notes.filter(n => n.kind === 'summary')],
+        ['Finished tasks', notes.filter(n => n.kind === 'task' && n.status === 'done')],
+    ];
+    const out = [`**Project memory**: ${notes.length} notes in \`${MEMORY_DIR}/\``];
+    for (const [title, group] of groups.filter(([, g]) => g.length)) {
+        out.push('', `**${title}**`, ...group.slice(0, 25).map(n => noteLine(ctx, n, 300)));
+        if (group.length > 25) {
+            out.push(`- … ${group.length - 25} more`);
+        }
+    }
+    return out.join('\n');
+}
+
+const SAVE_PROMPT = [
+    'Save what this conversation established to project memory, so later sessions start from it.',
+    'First call recall to see what is already saved. Then, for each decision made, non-obvious fact learned about the code, gotcha found, or task left unfinished,',
+    'call remember with one self-contained note of one or two sentences, attached to the symbols or files it is about.',
+    'Update notes that changed with update_note instead of adding duplicates, and mark finished tasks done.',
+    'Skip anything obvious from the code itself. Finish with one line saying what you saved.',
+].join(' ');
+
+const MEMORY_TOOLS = new Set(['recall', 'remember', 'update_note']);
+const WRITE_TOOLS = new Set(['remember', 'update_note', 'forget']);
+
 export async function handleChatRequest(
     request: vscode.ChatRequest,
     context: vscode.ChatContext,
@@ -152,15 +191,28 @@ export async function handleChatRequest(
         stream.markdown('No Unreal Engine project (.uproject) is open in this workspace, so @unreal has nothing to look up.');
         return {};
     }
+    const command = request.command;
+    if ((command === 'memory' || command === 'save') && !base.memory) {
+        stream.markdown('Project memory is off. Turn on `unrealLlmIndex.memory.enabled` to keep notes across sessions.');
+        return {};
+    }
+    if (command === 'memory') {
+        stream.markdown(renderMemoryOverview(base, base.memory!));
+        return { metadata: { command } };
+    }
+
     const model = request.model;
     const budget = model.maxInputTokens * CHARS_PER_TOKEN;
     const referenced = new Set<string>();
+    const read: string[] = [];
     const ctx: ToolContext = {
         ...base,
-        onRead: (file, start, end) => {
+        source: '@unreal',
+        onRead: (file, start, end, label) => {
             const key = `${file}:${start}-${end}`;
             if (!referenced.has(key)) {
                 referenced.add(key);
+                read.push(label);
                 stream.reference(new vscode.Location(vscode.Uri.file(file), new vscode.Range(start - 1, 0, Math.max(start, end) - 1, 0)));
             }
         },
@@ -168,17 +220,29 @@ export async function handleChatRequest(
 
     const index = await runTool('get_index', {}, base);
     const map = capOutput(index.text, 'Call get_module_outline or find_symbol for more.', Math.floor(budget * INDEX_SHARE));
+    const prompt = command === 'save' ? `${SAVE_PROMPT}${request.prompt.trim() ? `\n\nThe user adds: ${request.prompt.trim()}` : ''}` : promptWithReferences(request, base.limits.maxChars);
     const messages: Message[] = [
         vscode.LanguageModelChatMessage.User(`${TOOL_AGENT_PROMPT}\n\nThe project index (what get_index returns):\n\n${map}`),
         vscode.LanguageModelChatMessage.Assistant('I have the project index and will look up what I need with the tools.'),
         ...historyMessages(context),
-        vscode.LanguageModelChatMessage.User(promptWithReferences(request, base.limits.maxChars)),
+        vscode.LanguageModelChatMessage.User(prompt),
     ];
-    const tools: vscode.LanguageModelChatTool[] = TOOLS.map(t => ({ name: t.name, description: t.description, inputSchema: toolJsonSchema(t) }));
+    const tools: vscode.LanguageModelChatTool[] = TOOLS.filter(t => command !== 'save' || MEMORY_TOOLS.has(t.name)).map(t => ({
+        name: t.name,
+        description: t.description,
+        inputSchema: toolJsonSchema(t),
+    }));
     const results: ToolResultRef[] = [];
     const calls: string[] = [];
+    const saved: string[] = [];
     let useTools = true;
     const maxRounds = Math.max(1, deps.maxToolRounds());
+    const finish = (rounds: number): vscode.ChatResult => {
+        if (command === 'save') {
+            stream.markdown(saved.length ? `\n\n_${saved.length} note${saved.length > 1 ? 's' : ''} saved to \`${MEMORY_DIR}/\`._` : '\n\n_Nothing new was saved._');
+        }
+        return { metadata: { rounds, toolCalls: calls, read: read.slice(0, 30) } };
+    };
 
     for (let round = 1; round <= maxRounds; round++) {
         elideToolResults(messages, results, budget * ELIDE_AT);
@@ -219,7 +283,7 @@ export async function handleChatRequest(
             return errorResult(e, stream);
         }
         if (!toolCalls.length || token.isCancellationRequested) {
-            return { metadata: { rounds: round, toolCalls: calls } };
+            return finish(round);
         }
 
         messages.push(vscode.LanguageModelChatMessage.Assistant([...(text.length ? [new vscode.LanguageModelTextPart(text.join(''))] : []), ...toolCalls]));
@@ -229,11 +293,18 @@ export async function handleChatRequest(
             stream.progress(label);
             calls.push(label);
             const result = await runTool(call.name, call.input, ctx);
+            if (WRITE_TOOLS.has(call.name) && !result.isError) {
+                // Memory changes are shown, since @unreal doesn't ask before running tools
+                stream.markdown(`\n\n> 📝 ${result.text}\n\n`);
+                if (call.name === 'remember') {
+                    saved.push(result.text);
+                }
+            }
             parts.push(new vscode.LanguageModelToolResultPart(call.callId, [new vscode.LanguageModelTextPart(result.text)]));
         }
         messages.push(vscode.LanguageModelChatMessage.User(parts));
         parts.forEach((_, i) => results.push({ message: messages.length - 1, part: i, call: calls[calls.length - parts.length + i] }));
     }
     stream.markdown(`\n\n_Stopped after ${maxRounds} rounds of tool calls. Ask a narrower question, or raise \`unrealLlmIndex.chat.maxToolRounds\`._`);
-    return { metadata: { rounds: maxRounds, toolCalls: calls } };
+    return finish(maxRounds);
 }

@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-28
+
+### Added
+- **Project memory:** notes that carry decisions, facts about the code, gotchas and open tasks across sessions.
+  - **Storage:** `.llm-memory/` next to the `.uproject`, one Markdown file per note, to be committed and shared with the team.
+  - **Anchoring:** each note is linked to symbols or files. It is marked *may be outdated* when that code changes, and says so when the code is gone.
+- **Memory tools:** `remember`, `recall`, `update_note` and `forget`. They're marked as writing tools, so VS Code asks before saving (with Always allow); `recall` is read-only.
+- **Notes appear automatically:**
+  - `get_index` and INDEX.md list open tasks and the latest decisions.
+  - `read_symbol` and `get_file_outline` show notes about the code being read.
+  - `find_symbol` marks symbols that have notes.
+- **`@unreal` changes:**
+  - `/save` turns the conversation into notes; `/memory` lists them.
+  - Every note it saves is shown in the chat.
+  - Later turns are told what earlier answers looked at.
+- **Setting:** `unrealLlmIndex.memory.enabled`.
+- **CLI:** `--memory-dir` and `--no-memory` options.
+- **Instructions:** the Unreal agent, the tool prompt and the AGENTS.md section explain when to read and save notes.
+
+### Fixed
+- INDEX.md is rewritten when a project is opened, so it no longer keeps an older layout until a source file changes.
+
 ## [0.3.0] - 2026-09-28
 
 ### Added

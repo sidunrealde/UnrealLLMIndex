@@ -348,6 +348,7 @@ function renderPreamble(index: ProjectIndex): string {
         `- get_module_outline(module), get_file_outline(path), find_symbol(query), read_symbol(name) such as "${symbol}", read_lines(path, start, end), search_code(pattern), list_plugins(query).`,
         '- find_symbol, read_symbol and search_code take scope "project", "engine" or "all", so engine classes (e.g. ACharacter) and engine or Marketplace plugin code can be looked up too.',
         '- Tools accept any unique path suffix, such as the file name alone. Engine paths start with "Engine/".',
+        '- Project memory: recall(query or about) finds notes from earlier sessions; remember(text, kind, about) saves decisions, facts, gotchas and unfinished tasks. Without the tools, the notes are the files in .llm-memory/.',
         '',
         'Paths listed under each module below are relative to that module\'s Dir. Line numbers are 1-based.',
         UNREAL_CONVENTIONS,
@@ -357,6 +358,8 @@ function renderPreamble(index: ProjectIndex): string {
 export interface IndexOptions {
     /** Markdown lines describing the engine, from renderEngineSection. */
     engineSection?: string[];
+    /** Markdown lines with open tasks and recent notes, from renderMemorySection. */
+    memorySection?: string[];
 }
 
 export function renderIndex(index: ProjectIndex, options: IndexOptions = {}): string {
@@ -385,6 +388,9 @@ export function renderIndex(index: ProjectIndex, options: IndexOptions = {}): st
     }
     if (options.engineSection?.length) {
         out.push('', ...options.engineSection);
+    }
+    if (options.memorySection?.length) {
+        out.push('', ...options.memorySection);
     }
 
     out.push('', '## Modules');

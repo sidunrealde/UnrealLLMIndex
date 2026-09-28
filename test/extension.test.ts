@@ -2,10 +2,12 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { version } from '../package.json';
 import { SECTION_START } from '../src/agentInstructions';
 import { canonicalRoot } from '../src/engine/paths';
 import { syncEngineIndex } from '../src/engine/sync';
 import { activate, AGENT_FILE } from '../src/extension';
+import { copyFixture } from './fixtures';
 import { mock, Uri } from './vscode-mock';
 
 const FIXTURE = path.join(__dirname, 'fixtures/SampleGame');
@@ -30,7 +32,7 @@ describe('extension', () => {
         mock.reset();
         dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ue-llm-index-ext-'));
         cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ue-llm-index-ext-cache-'));
-        fs.cpSync(FIXTURE, dir, { recursive: true });
+        copyFixture(FIXTURE, dir);
         mock.uprojects = [path.join(dir, 'SampleGame.uproject')];
         mock.workspaceFolders = [dir];
         mock.settings['unrealLlmIndex.enginePath'] = FAKE_ENGINE;
@@ -61,9 +63,10 @@ describe('extension', () => {
         expect(server.label).toBe('Unreal LLM Index');
         expect(server.command).toBe(process.execPath);
         expect(server.args.slice(0, 8)).toEqual([path.join(EXTENSION_ROOT, 'dist', 'cli.js'), 'serve', dir, '--no-write', '--cache-dir', cacheDir, '--engine', FAKE_ENGINE]);
+        expect(server.args.slice(8, 10)).toEqual(['--memory-dir', path.join(dir, '.llm-memory')]);
         expect(server.args.slice(-4)).toEqual(['--max-result-tokens', '8000', '--max-read-lines', '400']);
         expect(server.env).toEqual({ ELECTRON_RUN_AS_NODE: '1' });
-        expect(server.version).toBe('0.3.0+9.9.1-12345');
+        expect(server.version).toBe(`${version}+9.9.1-12345`);
     });
 
     it('provides no servers when registration is turned off', async () => {
@@ -117,6 +120,17 @@ describe('extension', () => {
         expect(mock.openedDocuments).toEqual([path.join(dir, AGENT_FILE)]);
     });
 
+    it('keeps INDEX.md\'s project memory current when notes are added or edited', () => {
+        expect(indexMd()).toContain('## Project memory\nNo notes yet.');
+        const notes = path.join(dir, '.llm-memory');
+        fs.mkdirSync(notes);
+        fs.writeFileSync(path.join(notes, 'stairs.md'), '---\nkind: task\n---\nFinish the stair generator.\n');
+        const watcher = mock.watchers.find(w => w.pattern.pattern === '.llm-memory/*.md')!;
+        watcher.create.fire(Uri.file(path.join(notes, 'stairs.md')));
+        vi.runAllTimers();
+        expect(indexMd()).toMatch(/Open tasks \(1\):\n- \[stairs\] task \(open\), .*: Finish the stair generator\./);
+    });
+
     it('registers the @unreal chat participant', () => {
         expect(mock.participants.has('unrealLlmIndex.unreal')).toBe(true);
     });
@@ -127,20 +141,24 @@ describe('extension', () => {
     });
 });
 
-describe('extension with engine lookups turned off', () => {
+describe('extension with engine lookups and memory turned off', () => {
     it('serves the project only', async () => {
         mock.reset();
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ue-llm-index-ext-'));
-        fs.cpSync(FIXTURE, dir, { recursive: true });
+        copyFixture(FIXTURE, dir);
         mock.uprojects = [path.join(dir, 'SampleGame.uproject')];
         mock.settings['unrealLlmIndex.engine.enabled'] = false;
+        mock.settings['unrealLlmIndex.memory.enabled'] = false;
         const context = fakeContext();
         try {
             activate(context);
             await vi.waitFor(() => expect(fs.existsSync(path.join(dir, '.llm-index/INDEX.md'))).toBe(true));
             const [server] = await mock.mcpProviders.get('unrealLlmIndex').provideMcpServerDefinitions();
             expect(server.args).toContain('--no-engine');
-            expect(fs.readFileSync(path.join(dir, '.llm-index/INDEX.md'), 'utf8')).toContain('Engine lookups are turned off');
+            expect(server.args).toContain('--no-memory');
+            const indexMd = fs.readFileSync(path.join(dir, '.llm-index/INDEX.md'), 'utf8');
+            expect(indexMd).toContain('Engine lookups are turned off');
+            expect(indexMd).not.toContain('## Project memory');
         } finally {
             context.subscriptions.forEach((d: { dispose(): void }) => d.dispose());
             fs.rmSync(dir, { recursive: true, force: true });

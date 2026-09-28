@@ -9,6 +9,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import * as path from 'path';
+import { version } from '../package.json';
 import { TOOL_AGENT_PROMPT } from '../src/agentInstructions';
 import { runAgentLoop } from '../src/agentLoop';
 
@@ -42,7 +43,7 @@ async function main() {
         process.exit(1);
     }
 
-    const client = new Client({ name: 'agent-smoke', version: '0.3.0' });
+    const client = new Client({ name: 'agent-smoke', version });
     await client.connect(
         new StdioClientTransport({
             command: process.execPath,
