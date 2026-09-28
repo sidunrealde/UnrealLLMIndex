@@ -1,44 +1,219 @@
 {
   "name": "unreal-llm-index",
-  "version": "0.1.0",
-  "description": "Builds a compact, Unreal Engine-aware index of a UE C++ project and serves it to local LLMs over MCP, so small-context models can navigate the codebase without reading whole files.",
+  "displayName": "Unreal LLM Index",
+  "version": "0.3.0",
+  "description": "Unreal Engine-aware index of your UE C++ project, its engine, and engine and Marketplace (Fab) plugins, for any LLM in VS Code chat: MCP tools, an Unreal agent and an @unreal chat participant.",
+  "publisher": "sidunrealde",
   "license": "MIT",
   "author": "Siddartha Gonnabattula",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sidunrealde/UnrealLLMIndex.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sidunrealde/UnrealLLMIndex/issues"
+  },
+  "homepage": "https://github.com/sidunrealde/UnrealLLMIndex#readme",
+  "icon": "images/icon.png",
+  "galleryBanner": {
+    "color": "#16213F",
+    "theme": "dark"
+  },
+  "pricing": "Free",
   "keywords": [
     "unreal-engine",
+    "unreal",
+    "ue5",
     "llm",
     "mcp",
-    "ollama",
+    "ai",
+    "chat",
     "code-index"
   ],
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "engines": {
+    "vscode": "^1.138.0",
+    "node": ">=22.13"
+  },
+  "activationEvents": [
+    "workspaceContains:**/*.uproject"
+  ],
+  "main": "./dist/extension.js",
   "bin": {
     "ue-llm-index": "dist/cli.js"
   },
   "files": [
-    "dist",
-    "templates",
+    "dist/cli.js",
+    "dist/extension.js",
+    "dist/parseWorker.js",
+    "dist/agent-smoke.js",
+    "agents/unreal.agent.md",
+    "images/icon.png",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
-  "engines": {
-    "node": ">=20"
+  "contributes": {
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "unrealLlmIndex",
+        "label": "Unreal LLM Index"
+      }
+    ],
+    "commands": [
+      {
+        "command": "unrealLlmIndex.rebuild",
+        "title": "Rebuild Index",
+        "category": "Unreal LLM Index"
+      },
+      {
+        "command": "unrealLlmIndex.openIndex",
+        "title": "Open INDEX.md",
+        "category": "Unreal LLM Index"
+      },
+      {
+        "command": "unrealLlmIndex.syncEngineIndex",
+        "title": "Sync Engine Index",
+        "category": "Unreal LLM Index"
+      },
+      {
+        "command": "unrealLlmIndex.rebuildEngineIndex",
+        "title": "Rebuild Engine Index",
+        "category": "Unreal LLM Index"
+      },
+      {
+        "command": "unrealLlmIndex.selectEngine",
+        "title": "Select Engine…",
+        "category": "Unreal LLM Index"
+      },
+      {
+        "command": "unrealLlmIndex.clearEngineCache",
+        "title": "Clear Engine Index Cache",
+        "category": "Unreal LLM Index"
+      },
+      {
+        "command": "unrealLlmIndex.copyUnrealAgent",
+        "title": "Copy Unreal Agent to Workspace",
+        "category": "Unreal LLM Index"
+      },
+      {
+        "command": "unrealLlmIndex.addAgentsInstructions",
+        "title": "Add Instructions to AGENTS.md",
+        "category": "Unreal LLM Index"
+      }
+    ],
+    "configuration": {
+      "title": "Unreal LLM Index",
+      "properties": {
+        "unrealLlmIndex.registerMcpServer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Register the index as an MCP server with VS Code, so chat agents can use its lookup tools automatically with whichever model is selected."
+        },
+        "unrealLlmIndex.writeIndexFiles": {
+          "type": "boolean",
+          "default": true,
+          "description": "Keep the .llm-index/ folder in the project up to date, so any agent that can read files can use the index."
+        },
+        "unrealLlmIndex.engine.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Index the engine the project uses, with its engine and Marketplace (Fab) plugins, so agents can look up engine classes such as ACharacter."
+        },
+        "unrealLlmIndex.engine.autoSync": {
+          "type": "string",
+          "enum": [
+            "onStartup",
+            "manual"
+          ],
+          "enumDescriptions": [
+            "Build the engine index when a project is opened, and update it when the engine or its plugins change (checked at most every 12 hours).",
+            "Only when you run \"Unreal LLM Index: Sync Engine Index\"."
+          ],
+          "default": "onStartup",
+          "description": "When to build and update the engine index."
+        },
+        "unrealLlmIndex.enginePath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "The engine to index: the folder that contains `Engine/`, e.g. `C:\\Program Files\\Epic Games\\UE_5.8`. Leave empty to use the project's `EngineAssociation`. **Unreal LLM Index: Select Engine…** lists the installs it can find."
+        },
+        "unrealLlmIndex.cacheDir": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "Where engine indexes are kept, about 300 MB per engine. Leave empty for the default: `%LOCALAPPDATA%\\unreal-llm-index` on Windows, `~/Library/Caches/unreal-llm-index` on macOS, `~/.cache/unreal-llm-index` on Linux."
+        },
+        "unrealLlmIndex.maxResultTokens": {
+          "type": "number",
+          "default": 8000,
+          "minimum": 0,
+          "markdownDescription": "Largest tool result, in tokens (about 3.5 characters each). Raise it for long-context models, lower it for small ones. `0` sizes results for `@unreal` to the model (6% of its input limit)."
+        },
+        "unrealLlmIndex.maxReadLines": {
+          "type": "number",
+          "default": 400,
+          "minimum": 20,
+          "description": "Most lines one read_lines or read_symbol call returns."
+        },
+        "unrealLlmIndex.chat.maxToolRounds": {
+          "type": "number",
+          "default": 15,
+          "minimum": 1,
+          "description": "Most rounds of tool calls @unreal makes for one question."
+        }
+      }
+    },
+    "chatParticipants": [
+      {
+        "id": "unrealLlmIndex.unreal",
+        "name": "unreal",
+        "fullName": "Unreal",
+        "description": "Ask about this Unreal project, its engine and plugins",
+        "isSticky": true
+      }
+    ],
+    "chatAgents": [
+      {
+        "path": "./agents/unreal.agent.md",
+        "when": "unrealLlmIndex.hasProject && !unrealLlmIndex.hasWorkspaceAgent",
+        "sessionTypes": [
+          "local"
+        ]
+      }
+    ]
   },
   "scripts": {
     "build": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "smoke": "node dist/agent-smoke.js"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.1",
-    "zod": "^4.6.5"
+    "vscode:prepublish": "node esbuild.js",
+    "package": "vsce package --no-dependencies"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
     "@types/node": "^22.20.4",
+    "@types/vscode": "~1.138.0",
+    "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.28.2",
     "typescript": "^5.9.3",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.2",
+    "zod": "^4.6.5"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "In untrusted workspaces the index is not written into the project, and the engine path and cache folder settings are ignored.",
+      "restrictedConfigurations": [
+        "unrealLlmIndex.enginePath",
+        "unrealLlmIndex.cacheDir"
+      ]
+    }
   }
 }

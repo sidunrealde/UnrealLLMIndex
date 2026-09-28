@@ -1,12 +1,18 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { ModuleInfo, PluginInfo, ProjectInfo } from './types';
+import { ModuleInfo, PluginCategory, PluginInfo, PluginRef, ProjectInfo } from './types';
 
 /** Directories that never contain hand-written source. Compared case-insensitively. */
 export const SKIP_DIRS = new Set([
     'intermediate', 'binaries', 'saved', 'deriveddatacache', 'content',
     '.git', '.vs', '.vscode', '.idea', 'node_modules', '.llm-index',
 ]);
+
+/** Engine installs also skip bundled third-party code, standalone programs, plugin templates and non-code folders. */
+export const ENGINE_SKIP_DIRS = new Set([...SKIP_DIRS, 'thirdparty', 'programs', 'resources', 'shaders', 'documentation', 'extras', 'templates']);
+
+/** Engine folders that hold modules and plugins, relative to the install root. */
+export const ENGINE_TOPS = ['Engine/Source/Runtime', 'Engine/Source/Developer', 'Engine/Source/Editor', 'Engine/Plugins', 'Engine/Platforms'];
 
 export const SOURCE_EXTENSIONS = new Set(['.h', '.hpp', '.hh', '.inl', '.cpp', '.cc', '.cxx', '.c']);
 
@@ -57,38 +63,6 @@ export function findUprojectFile(input: string): string | undefined {
     return undefined;
 }
 
-interface WalkResult {
-    sources: string[];
-    buildFiles: string[];
-    pluginFiles: string[];
-}
-
-function walk(dir: string, out: WalkResult) {
-    let entries: fs.Dirent[];
-    try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-        return;
-    }
-    for (const entry of entries) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-            if (!SKIP_DIRS.has(entry.name.toLowerCase())) {
-                walk(full, out);
-            }
-            continue;
-        }
-        const lower = entry.name.toLowerCase();
-        if (lower.endsWith('.build.cs')) {
-            out.buildFiles.push(full);
-        } else if (lower.endsWith('.uplugin')) {
-            out.pluginFiles.push(full);
-        } else if (SOURCE_EXTENSIONS.has(path.extname(lower))) {
-            out.sources.push(full);
-        }
-    }
-}
-
 /** Extracts Public/PrivateDependencyModuleNames from a .Build.cs file. */
 export function parseBuildCs(text: string): { publicDeps: string[]; privateDeps: string[] } {
     const clean = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
@@ -104,7 +78,118 @@ export function parseBuildCs(text: string): { publicDeps: string[]; privateDeps:
     return { publicDeps: [...deps.Public], privateDeps: [...deps.Private] };
 }
 
-const isInside = (dir: string, file: string) => file.toLowerCase().startsWith(dir.toLowerCase() + '/');
+/** "Plugins" entries of a .uproject or .uplugin. */
+function pluginRefs(list: unknown): PluginRef[] {
+    return Array.isArray(list)
+        ? list.filter(p => p && typeof p.Name === 'string').map(p => ({ name: String(p.Name), enabled: p.Enabled !== false }))
+        : [];
+}
+
+/** Module entries (Name, Type, LoadingPhase) of a descriptor, keyed by lower-case name. */
+function moduleDescriptors(list: unknown): Map<string, any> {
+    const map = new Map<string, any>();
+    for (const m of Array.isArray(list) ? list : []) {
+        if (m && typeof m.Name === 'string') {
+            map.set(m.Name.toLowerCase(), m);
+        }
+    }
+    return map;
+}
+
+export interface ScanTreeOptions {
+    /** Directory names to skip, lower-case. Defaults to SKIP_DIRS. */
+    skipDirs?: Set<string>;
+    /** Category of a plugin found in `dir` (relative to the base). Defaults to 'project'. */
+    categoryOf?: (dir: string) => PluginCategory;
+    /** Module descriptors known before the walk, such as the .uproject's. */
+    moduleDescriptors?: Map<string, any>;
+}
+
+export interface ScanTreeResult {
+    plugins: PluginInfo[];
+    modules: ModuleInfo[];
+    /** Source files that are not inside a module. */
+    looseFiles: string[];
+}
+
+interface WalkContext {
+    plugin?: PluginInfo;
+    descriptors: Map<string, any>;
+    module?: ModuleInfo;
+}
+
+/**
+ * Finds plugins (*.uplugin), modules (*.Build.cs) and source files under `tops` in one walk.
+ * Each file belongs to the innermost module above it, and each module to the innermost plugin.
+ */
+export function scanTree(base: string, tops: string[], options: ScanTreeOptions = {}): ScanTreeResult {
+    const skip = options.skipDirs ?? SKIP_DIRS;
+    const result: ScanTreeResult = { plugins: [], modules: [], looseFiles: [] };
+
+    const walk = (dir: string, rel: string, ctx: WalkContext) => {
+        let entries: fs.Dirent[];
+        try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+            return;
+        }
+        // Descriptors first: they own everything in and below this folder
+        for (const entry of entries) {
+            if (entry.isFile() && entry.name.toLowerCase().endsWith('.uplugin')) {
+                const json = readJson(path.join(dir, entry.name));
+                const description = typeof json.Description === 'string' ? json.Description.trim() : '';
+                const plugin: PluginInfo = {
+                    name: entry.name.slice(0, -'.uplugin'.length),
+                    dir: rel,
+                    friendlyName: typeof json.FriendlyName === 'string' && json.FriendlyName ? json.FriendlyName : undefined,
+                    description: description ? description.slice(0, 200) : undefined,
+                    modules: Array.isArray(json.Modules) ? json.Modules.map((m: any) => String(m.Name)) : [],
+                    category: options.categoryOf?.(rel) ?? 'project',
+                    enabledByDefault: typeof json.EnabledByDefault === 'boolean' ? json.EnabledByDefault : undefined,
+                    installed: json.Installed === true ? true : undefined,
+                    pluginDeps: pluginRefs(json.Plugins),
+                };
+                result.plugins.push(plugin);
+                ctx = { plugin, descriptors: moduleDescriptors(json.Modules) };
+            }
+        }
+        for (const entry of entries) {
+            if (entry.isFile() && entry.name.toLowerCase().endsWith('.build.cs')) {
+                const name = entry.name.slice(0, -'.build.cs'.length);
+                const descriptor = ctx.descriptors.get(name.toLowerCase()) ?? options.moduleDescriptors?.get(name.toLowerCase());
+                const module: ModuleInfo = {
+                    name: descriptor?.Name ? String(descriptor.Name) : name,
+                    dir: rel,
+                    type: descriptor?.Type,
+                    loadingPhase: descriptor?.LoadingPhase,
+                    plugin: ctx.plugin?.name,
+                    ...parseBuildCs(readText(path.join(dir, entry.name))),
+                    files: [],
+                };
+                result.modules.push(module);
+                ctx = { ...ctx, module };
+            }
+        }
+        for (const entry of entries) {
+            if (entry.isDirectory()) {
+                if (!skip.has(entry.name.toLowerCase())) {
+                    walk(path.join(dir, entry.name), `${rel}/${entry.name}`, ctx);
+                }
+            } else if (entry.isFile() && SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
+                (ctx.module ? ctx.module.files : result.looseFiles).push(`${rel}/${entry.name}`);
+            }
+        }
+    };
+
+    for (const top of tops) {
+        walk(path.join(base, top), top.split(/[\\/]/).join('/'), { descriptors: new Map() });
+    }
+    for (const module of result.modules) {
+        module.files.sort();
+    }
+    result.looseFiles.sort();
+    return result;
+}
 
 export function scanProject(input: string): ProjectInfo {
     const uprojectFile = findUprojectFile(input);
@@ -114,81 +199,35 @@ export function scanProject(input: string): ProjectInfo {
     const root = path.dirname(uprojectFile);
     const uproject = readJson(uprojectFile);
 
-    const found: WalkResult = { sources: [], buildFiles: [], pluginFiles: [] };
-    for (const top of ['Source', 'Plugins']) {
-        walk(path.join(root, top), found);
-    }
-
-    const plugins: PluginInfo[] = found.pluginFiles.map(file => {
-        const json = readJson(file);
-        const description = typeof json.Description === 'string' ? json.Description.trim() : '';
-        return {
-            name: path.basename(file, path.extname(file)),
-            dir: toRel(root, path.dirname(file)),
-            friendlyName: json.FriendlyName || undefined,
-            description: description ? description.slice(0, 200) : undefined,
-            modules: Array.isArray(json.Modules) ? json.Modules.map((m: any) => String(m.Name)) : [],
-        };
-    });
-
-    const moduleDescriptors = new Map<string, any>();
-    for (const m of Array.isArray(uproject.Modules) ? uproject.Modules : []) {
-        moduleDescriptors.set(String(m.Name).toLowerCase(), m);
-    }
-    for (const file of found.pluginFiles) {
-        const json = readJson(file);
-        for (const m of Array.isArray(json.Modules) ? json.Modules : []) {
-            moduleDescriptors.set(String(m.Name).toLowerCase(), m);
-        }
-    }
-
-    const modules: ModuleInfo[] = found.buildFiles.map(file => {
-        const name = path.basename(file).replace(/\.build\.cs$/i, '');
-        const dir = toRel(root, path.dirname(file));
-        const plugin = plugins
-            .filter(p => isInside(p.dir, dir))
-            .sort((a, b) => b.dir.length - a.dir.length)[0];
-        const descriptor = moduleDescriptors.get(name.toLowerCase());
-        return {
-            name: descriptor?.Name ? String(descriptor.Name) : name,
-            dir,
-            type: descriptor?.Type,
-            loadingPhase: descriptor?.LoadingPhase,
-            plugin: plugin?.name,
-            ...parseBuildCs(readText(file)),
-            files: [],
-        };
-    });
-
-    // Longest directory first so nested modules win
-    const byDepth = [...modules].sort((a, b) => b.dir.length - a.dir.length);
-    const looseFiles: string[] = [];
-    for (const abs of found.sources.sort()) {
-        const rel = toRel(root, abs);
-        const owner = byDepth.find(m => isInside(m.dir, rel));
-        if (owner) {
-            owner.files.push(rel);
-        } else {
-            looseFiles.push(rel);
-        }
-    }
-
+    const { plugins, modules, looseFiles } = scanTree(root, ['Source', 'Plugins'], { moduleDescriptors: moduleDescriptors(uproject.Modules) });
     modules.sort((a, b) => Number(!!a.plugin) - Number(!!b.plugin) || a.name.localeCompare(b.name));
 
-    const enabledPlugins = (Array.isArray(uproject.Plugins) ? uproject.Plugins : [])
-        .filter((p: any) => p.Enabled !== false)
-        .map((p: any) => String(p.Name));
-
+    const refs = pluginRefs(uproject.Plugins);
     return {
         root,
         uprojectFile,
         name: path.basename(uprojectFile, '.uproject'),
         engineAssociation: typeof uproject.EngineAssociation === 'string' ? uproject.EngineAssociation : '',
-        enabledPlugins,
+        enabledPlugins: refs.filter(p => p.enabled).map(p => p.name),
+        pluginRefs: refs,
+        disableEnginePluginsByDefault: uproject.DisableEnginePluginsByDefault === true,
         plugins,
         modules,
         looseFiles,
     };
+}
+
+export function engineCategoryOf(dir: string): PluginCategory {
+    const lower = dir.toLowerCase();
+    if (lower.startsWith('engine/plugins/marketplace/')) {
+        return 'marketplace';
+    }
+    return lower.startsWith('engine/platforms/') ? 'platform' : 'engine';
+}
+
+/** Modules and plugins of an engine install. `root` is the folder that contains Engine/. */
+export function scanEngine(root: string): ScanTreeResult {
+    return scanTree(root, ENGINE_TOPS, { skipDirs: ENGINE_SKIP_DIRS, categoryOf: engineCategoryOf });
 }
 
 export function allSourceFiles(project: ProjectInfo): string[] {

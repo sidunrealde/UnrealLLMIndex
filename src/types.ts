@@ -54,6 +54,20 @@ export interface CodeSymbol {
     definitions?: SourceRange[];
 }
 
+/** What outline rendering and the tools need from an index, whether it covers the project or the engine. */
+export interface SourceIndex {
+    /** Declarations in one file, with `definitions` filled in for functions declared there. */
+    symbolsInFile(rel: string): CodeSymbol[];
+    lineCount(rel: string): number;
+    /** True if `qualified` names a class, struct or interface. */
+    isType(qualified: string | undefined): boolean;
+    /** How a path is shown in tool output. Tools must accept it back. */
+    shortPath(rel: string): string;
+    moduleOf(rel: string): ModuleInfo | undefined;
+    readFileLines(rel: string): string[];
+    absolutePath(rel: string): string;
+}
+
 export interface ModuleInfo {
     name: string;
     /** Project-relative module directory (contains <Name>.Build.cs). */
@@ -68,12 +82,28 @@ export interface ModuleInfo {
     files: string[];
 }
 
+/** Where a plugin lives: the project, the engine, the engine's Marketplace (Fab) folder, or a platform extension. */
+export type PluginCategory = 'project' | 'engine' | 'marketplace' | 'platform';
+
+/** A plugin reference from a .uproject or .uplugin "Plugins" list. */
+export interface PluginRef {
+    name: string;
+    enabled: boolean;
+}
+
 export interface PluginInfo {
     name: string;
     dir: string;
     friendlyName?: string;
     description?: string;
     modules: string[];
+    category: PluginCategory;
+    /** "EnabledByDefault" from the descriptor, if present. */
+    enabledByDefault?: boolean;
+    /** "Installed" from the descriptor: set for Marketplace/Fab installs. */
+    installed?: boolean;
+    /** Other plugins this one references in its descriptor. */
+    pluginDeps: PluginRef[];
 }
 
 export interface ProjectInfo {
@@ -83,6 +113,10 @@ export interface ProjectInfo {
     engineAssociation: string;
     /** Plugins enabled in the .uproject (mostly engine plugins). */
     enabledPlugins: string[];
+    /** Every plugin the .uproject mentions, enabled or not. */
+    pluginRefs: PluginRef[];
+    /** "DisableEnginePluginsByDefault" from the .uproject. */
+    disableEnginePluginsByDefault: boolean;
     plugins: PluginInfo[];
     modules: ModuleInfo[];
     /** Source files under Source/ or Plugins/ that are not inside a module. */

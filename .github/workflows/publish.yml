@@ -1,0 +1,73 @@
+name: Build and publish
+
+# Pull requests to main: typecheck, test and package.
+# Merges to main (and v* tags, or a manual run): the same, then publish to the VS Code Marketplace.
+# Publishing skips versions that are already on the Marketplace, so bump package.json to release.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test and package
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          # The engine index uses node:sqlite (Node.js 22.13 or later)
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: Read the version
+        id: version
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+
+      - name: Package
+        run: npm run package
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vsix
+          path: unreal-llm-index-${{ steps.version.outputs.version }}.vsix
+
+  publish:
+    name: Publish to the VS Code Marketplace
+    needs: build
+    # Pull requests only build; merged code publishes
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: vsix
+
+      - name: Publish
+        run: npx --yes @vscode/vsce@^4 publish --packagePath unreal-llm-index-${{ needs.build.outputs.version }}.vsix --skip-duplicate
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}

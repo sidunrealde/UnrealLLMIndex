@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { parseSource } from './parse';
 import { allSourceFiles, readText, scanProject, SKIP_DIRS } from './scan';
-import { CodeSymbol, ModuleInfo, ProjectInfo, SymbolKind } from './types';
+import { CodeSymbol, ModuleInfo, ProjectInfo, SourceIndex, SymbolKind } from './types';
 
 interface FileEntry {
     mtimeMs: number;
@@ -16,12 +16,12 @@ const REFRESH_THROTTLE_MS = 1500;
 
 export const qualifiedName = (s: CodeSymbol) => (s.container ? `${s.container}::${s.name}` : s.name);
 
-export class ProjectIndex {
+export class ProjectIndex implements SourceIndex {
     private projectInfo?: ProjectInfo;
     private readonly files = new Map<string, FileEntry>();
     private shortPaths = new Map<string, string>();
     private typeNames = new Set<string>();
-    private structureKey = '';
+    private structure = '';
     private lastRefresh = 0;
     generatedAt = new Date();
 
@@ -38,6 +38,11 @@ export class ProjectIndex {
         return this.project.root;
     }
 
+    /** Changes whenever modules, their dependencies, plugins or the file list change. */
+    get structureKey(): string {
+        return this.structure;
+    }
+
     /** Rescans the project and re-parses files whose size or mtime changed. Returns true if anything changed. */
     refresh(force = false): boolean {
         if (!force && Date.now() - this.lastRefresh < REFRESH_THROTTLE_MS) {
@@ -47,13 +52,15 @@ export class ProjectIndex {
 
         const project = scanProject(this.input);
         const sources = allSourceFiles(project);
-        const structureKey = JSON.stringify([
+        const structure = JSON.stringify([
             project.engineAssociation,
-            project.enabledPlugins,
+            project.pluginRefs,
+            project.disableEnginePluginsByDefault,
+            project.plugins.map(p => [p.name, p.dir]),
             project.modules.map(m => [m.name, m.dir, m.publicDeps, m.privateDeps]),
             sources,
         ]);
-        let changed = structureKey !== this.structureKey;
+        let changed = structure !== this.structure;
 
         const seen = new Set<string>();
         for (const rel of sources) {
@@ -85,7 +92,7 @@ export class ProjectIndex {
         }
 
         this.projectInfo = project;
-        this.structureKey = structureKey;
+        this.structure = structure;
         if (changed) {
             this.rebuildDerived();
             this.generatedAt = new Date();
@@ -202,54 +209,66 @@ export class ProjectIndex {
         throw new Error(`File not found in project: "${input}". Use a path from the index, e.g. "${this.shortPath(files[0] ?? '')}".`);
     }
 
+    absolutePath(rel: string): string {
+        return path.join(this.root, rel);
+    }
+
     readFileLines(rel: string): string[] {
-        const abs = path.join(this.root, rel);
+        const abs = this.absolutePath(rel);
         if (fs.statSync(abs).size > 2_000_000) {
             throw new Error(`${rel} is too large to read`);
         }
         return readText(abs).split(/\r?\n/);
     }
 
-    /** Ranked symbol search: exact qualified name, exact name, prefix, substring, then subsequence. */
-    findSymbols(query: string, kind?: SymbolKind, limit = 20): CodeSymbol[] {
+    /**
+     * Ranked symbol search: exact qualified name, exact name, qualified suffix, prefix, substring, then
+     * subsequence (`tier` 100 to 20). Within a tier, types and declarations come first (`bonus`).
+     */
+    findSymbolMatches(query: string, kind?: SymbolKind, limit = 20): { symbol: CodeSymbol; tier: number; bonus: number }[] {
         const q = query.trim().toLowerCase();
         if (!q) {
             return [];
         }
-        const scored: { s: CodeSymbol; score: number }[] = [];
+        const scored: { symbol: CodeSymbol; tier: number; bonus: number }[] = [];
         for (const s of this.allSymbols()) {
             if (kind && s.kind !== kind) {
                 continue;
             }
             const qn = qualifiedName(s).toLowerCase();
             const name = s.name.toLowerCase();
-            let score = 0;
+            let tier = 0;
             if (qn === q) {
-                score = 100;
+                tier = 100;
             } else if (name === q) {
-                score = 90;
+                tier = 90;
             } else if (qn.endsWith('::' + q)) {
-                score = 85;
+                tier = 85;
             } else if (name.startsWith(q)) {
-                score = 70;
+                tier = 70;
             } else if (qn.includes(q)) {
-                score = 50;
+                tier = 50;
             } else if (isSubsequence(q, qn)) {
-                score = 20;
+                tier = 20;
             }
-            if (score) {
+            if (tier) {
                 // Prefer declarations over definitions, and types over members
+                let bonus = 0;
                 if (TYPE_KINDS.has(s.kind) || s.kind === 'enum') {
-                    score += 5;
+                    bonus += 5;
                 }
                 if (s.isDefinition && s.file.match(/\.(cpp|cc|cxx|c)$/)) {
-                    score -= 2;
+                    bonus -= 2;
                 }
-                scored.push({ s, score });
+                scored.push({ symbol: s, tier, bonus });
             }
         }
-        scored.sort((a, b) => b.score - a.score || qualifiedName(a.s).length - qualifiedName(b.s).length);
-        return scored.slice(0, limit).map(x => x.s);
+        scored.sort((a, b) => b.tier + b.bonus - (a.tier + a.bonus) || qualifiedName(a.symbol).length - qualifiedName(b.symbol).length);
+        return scored.slice(0, limit);
+    }
+
+    findSymbols(query: string, kind?: SymbolKind, limit = 20): CodeSymbol[] {
+        return this.findSymbolMatches(query, kind, limit).map(m => m.symbol);
     }
 
     /** Symbols matching a name exactly: "UAgent::ToJsonObject", "ToJsonObject" or "UAgent". */

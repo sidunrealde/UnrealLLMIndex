@@ -7,10 +7,9 @@ const baseConfig = {
   bundle: true,
   format: "cjs",
   platform: "node",
-  target: "node20",
+  target: "node22",
   sourcemap: true,
   logLevel: "info",
-  loader: { ".md": "text" },
 };
 
 const builds = [
@@ -19,6 +18,18 @@ const builds = [
     entryPoints: ["./src/cli.ts"],
     outfile: "./dist/cli.js",
     banner: { js: "#!/usr/bin/env node" },
+  },
+  {
+    ...baseConfig,
+    entryPoints: ["./src/extension.ts"],
+    outfile: "./dist/extension.js",
+    external: ["vscode"],
+  },
+  {
+    ...baseConfig,
+    // Parses engine files on worker threads during `engine sync`; loaded from next to cli.js
+    entryPoints: ["./src/engine/parseWorker.ts"],
+    outfile: "./dist/parseWorker.js",
   },
   {
     ...baseConfig,
