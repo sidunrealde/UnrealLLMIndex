@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-28
+
+### Added
+- **`find_references`** shows where a function, type, property or delegate is used.
+  - **What it finds:** calls, delegate and input bindings (`AddDynamic`, `BindAction(..., &AClass::Func)`, `BindUFunction`), `Broadcast`/`Execute` calls, overrides, base-class declarations, and uses of types and properties. Each hit comes with the function it's in.
+  - **How:** matches are found by name and sorted out with the parser. The symbol's own declarations and same-named members of unrelated classes are left out. Hits in files that don't name the class or a subclass are marked as possibly unrelated.
+  - **Hidden by default:** comments, strings and bare mentions, unless `include_text` is set.
+- **`callers`** lists the functions that call or bind a function, following them up to three levels.
+- **The evaluation kit:**
+  - **Questions:** in `.llm-eval/questions.json`, with automatic checks (names the answer must or must not mention, tools to call, a tool-call budget) and optional grading against a reference answer.
+  - **Runs:** **Run Evaluation** uses any VS Code chat model (including Custom Endpoint models) through `@unreal`, or `eval run` uses an OpenAI-compatible endpoint.
+  - **Reports:** Markdown and JSON in `.llm-eval/results/`, and **Compare Evaluation Results** / `eval compare` puts two runs side by side.
+  - **Starter set:** **Create Evaluation Questions** / `eval init` generates questions from the project's index.
+- **Documentation:** a [user guide](docs/USER_GUIDE.md) and a [design document](docs/DESIGN.md). The README is now a short introduction.
+
+### Changed
+- `@unreal` reports an estimate of its largest prompt, and can leave out the memory-writing tools; evaluation runs never write memory.
+- `serve --read-only-memory` leaves out the memory-writing tools.
+
 ## [0.4.0] - 2026-09-28
 
 ### Added

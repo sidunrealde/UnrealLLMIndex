@@ -25,6 +25,8 @@ export interface ServerOptions {
     writeFiles: boolean;
     engine?: EngineProvider;
     memory?: MemoryStore;
+    /** Leave out the tools that change project memory, e.g. for evaluation runs. */
+    readOnlyMemory?: boolean;
     limits?: OutputLimits;
     rgPath?: string;
 }
@@ -58,7 +60,7 @@ export function createServer(index: ProjectIndex, options: ServerOptions): McpSe
         }
     };
 
-    for (const tool of TOOLS) {
+    for (const tool of TOOLS.filter(t => !(options.readOnlyMemory && t.readOnly === false))) {
         const readOnly = tool.readOnly !== false;
         server.registerTool(
             tool.name,
@@ -90,6 +92,7 @@ export interface StartOptions {
     cacheDir?: string;
     /** The memory folder, null for no memory, or undefined for <project>/.llm-memory. */
     memoryDir?: string | null;
+    readOnlyMemory?: boolean;
     rgPath?: string;
     limits?: OutputLimits;
 }
@@ -107,7 +110,15 @@ export async function startServer(projectDir: string, options: StartOptions) {
         }
     }
     const rgPath = options.rgPath ?? findRipgrep();
-    const server = createServer(index, { version: options.version, writeFiles: options.writeFiles, engine, memory, limits: options.limits, rgPath });
+    const server = createServer(index, {
+        version: options.version,
+        writeFiles: options.writeFiles,
+        engine,
+        memory,
+        readOnlyMemory: options.readOnlyMemory,
+        limits: options.limits,
+        rgPath,
+    });
     await server.connect(new StdioServerTransport());
     const state = engine.state();
     const engineText = 'handle' in state ? `engine ${state.handle.install.root}` : `no engine index (${state.message})`;

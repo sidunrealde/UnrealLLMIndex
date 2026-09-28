@@ -61,7 +61,7 @@ describe('MCP tools', () => {
 
     it('lists the tools; lookups are read-only so VS Code runs them without asking, memory writes ask', async () => {
         const { tools } = await session.client.listTools();
-        const lookups = ['find_symbol', 'get_file_outline', 'get_index', 'get_module_outline', 'list_plugins', 'read_lines', 'read_symbol', 'recall', 'search_code'];
+        const lookups = ['callers', 'find_references', 'find_symbol', 'get_file_outline', 'get_index', 'get_module_outline', 'list_plugins', 'read_lines', 'read_symbol', 'recall', 'search_code'];
         expect(tools.map(t => t.name).sort()).toEqual([...lookups, 'forget', 'remember', 'update_note'].sort());
         for (const tool of tools) {
             const readOnly = lookups.includes(tool.name);

@@ -13,7 +13,9 @@ import { MEMORY_DIR, MemoryStore } from './memory';
 import { registerUnrealParticipant } from './participant';
 import { findRipgrep } from './search';
 import { indexSections } from './server';
-import { DEFAULT_READ_LINES, DEFAULT_RESULT_TOKENS, limitsFor } from './tools';
+import { compareReports, EVAL_DIR, EvalReport, generateQuestions, loadQuestions, QUESTIONS_FILE, renderQuestionsFile, writeReport } from './eval';
+import { runEvalInChat } from './evalChat';
+import { DEFAULT_READ_LINES, DEFAULT_RESULT_TOKENS, limitsFor, ToolContext } from './tools';
 
 const WATCH_GLOB = '{Source,Plugins}/**/*.{h,hpp,hh,inl,cpp,cc,cxx,c,cs,uplugin}';
 const IGNORED_PATH = /[\\/](Intermediate|Binaries|Saved|DerivedDataCache|\.llm-index)[\\/]/i;
@@ -362,28 +364,42 @@ export function activate(context: vscode.ExtensionContext) {
         log('This VS Code version has no MCP server API; only the .llm-index/ files are provided.');
     }
 
+    /** Tools for @unreal and evaluation runs, sized for the request's model. */
+    function chatToolContext(project: IndexedProject | undefined, model: vscode.LanguageModelChat): ToolContext | undefined {
+        if (!project) {
+            return undefined;
+        }
+        project.index.refresh();
+        const configured = config().get<number>('maxResultTokens', DEFAULT_RESULT_TOKENS);
+        // 0 means "size results to the model"
+        const tokens = configured > 0 ? configured : Math.min(16_000, Math.max(2_000, Math.round(model.maxInputTokens * 0.06)));
+        return {
+            project: project.index,
+            engine: project.engine,
+            memory: project.memory,
+            limits: limitsFor(tokens, config().get<number>('maxReadLines', DEFAULT_READ_LINES)),
+            rgPath,
+        };
+    }
+
     if (typeof vscode.chat?.createChatParticipant === 'function') {
         context.subscriptions.push(
             registerUnrealParticipant({
-                toolContext: request => {
-                    const project = projectFor(vscode.window.activeTextEditor?.document.uri);
-                    if (!project) {
-                        return undefined;
-                    }
-                    project.index.refresh();
-                    const configured = config().get<number>('maxResultTokens', DEFAULT_RESULT_TOKENS);
-                    // 0 means "size results to the model"
-                    const tokens = configured > 0 ? configured : Math.min(16_000, Math.max(2_000, Math.round(request.model.maxInputTokens * 0.06)));
-                    return {
-                        project: project.index,
-                        engine: project.engine,
-                        memory: project.memory,
-                        limits: limitsFor(tokens, config().get<number>('maxReadLines', DEFAULT_READ_LINES)),
-                        rgPath,
-                    };
-                },
+                toolContext: request => chatToolContext(projectFor(vscode.window.activeTextEditor?.document.uri), request.model),
                 maxToolRounds: () => config().get<number>('chat.maxToolRounds', 15),
             }),
+        );
+    }
+
+    async function createQuestions(project: IndexedProject, file: string) {
+        const ctx = chatToolContext(project, { maxInputTokens: 128_000 } as vscode.LanguageModelChat)!;
+        const questions = await generateQuestions(ctx);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, renderQuestionsFile(questions), 'utf8');
+        log(`${project.name}: wrote ${questions.length} starter questions to ${file}`);
+        await vscode.window.showTextDocument(vscode.Uri.file(file));
+        void vscode.window.showInformationMessage(
+            `Created ${EVAL_DIR}/${QUESTIONS_FILE} with ${questions.length} questions generated from this project. Replace them with questions from your own work, then run the evaluation.`,
         );
     }
 
@@ -479,6 +495,124 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showWarningMessage(`Unreal LLM Index: some files are in use (close other VS Code windows on this engine): ${e.message}`);
             }
             resetEngines();
+        }),
+
+        vscode.commands.registerCommand('unrealLlmIndex.createEvaluation', async () => {
+            const project = await pickProject('Create evaluation questions for which project?');
+            if (!project) {
+                return;
+            }
+            const file = path.join(project.root, EVAL_DIR, QUESTIONS_FILE);
+            if (fs.existsSync(file)) {
+                const replace = await vscode.window.showWarningMessage(`${EVAL_DIR}/${QUESTIONS_FILE} already exists. Replace it with generated questions?`, { modal: true }, 'Replace');
+                if (replace !== 'Replace') {
+                    return;
+                }
+            }
+            await createQuestions(project, file);
+        }),
+
+        vscode.commands.registerCommand('unrealLlmIndex.runEvaluation', async () => {
+            const project = await pickProject('Evaluate which project?');
+            if (!project) {
+                return;
+            }
+            const file = path.join(project.root, EVAL_DIR, QUESTIONS_FILE);
+            if (!fs.existsSync(file)) {
+                const create = await vscode.window.showInformationMessage(
+                    `There are no evaluation questions yet. Create ${EVAL_DIR}/${QUESTIONS_FILE} with starter questions from this project?`,
+                    'Create',
+                );
+                if (create) {
+                    await createQuestions(project, file);
+                }
+                return;
+            }
+            let questions;
+            try {
+                questions = loadQuestions(file);
+            } catch (e: any) {
+                void vscode.window.showErrorMessage(`Unreal LLM Index: ${e.message}`);
+                await vscode.window.showTextDocument(vscode.Uri.file(file));
+                return;
+            }
+            const models = await vscode.lm.selectChatModels();
+            if (!models.length) {
+                void vscode.window.showWarningMessage('Unreal LLM Index: no chat models are available. Add or sign in to one in the chat view first.');
+                return;
+            }
+            const choice = await vscode.window.showQuickPick(
+                models.map(model => ({ label: model.name, description: `${model.vendor} · ${model.family}`, detail: `${model.maxInputTokens.toLocaleString()} input tokens`, model })),
+                { placeHolder: `Which model should answer the ${questions.length} questions?` },
+            );
+            if (!choice) {
+                return;
+            }
+            let grade = false;
+            if (questions.some(q => q.reference)) {
+                const answer = await vscode.window.showQuickPick(
+                    [
+                        { label: 'Checks and grading', description: 'The same model scores answers that have a reference, 1 to 5', grade: true },
+                        { label: 'Checks only', grade: false },
+                    ],
+                    { placeHolder: 'Grade answers against their reference answers?' },
+                );
+                if (!answer) {
+                    return;
+                }
+                grade = answer.grade;
+            }
+            await vscode.window.withProgress(
+                { location: vscode.ProgressLocation.Notification, title: `Evaluating ${choice.model.name}`, cancellable: true },
+                async (progress, token) => {
+                    let reported = 0;
+                    const report = await runEvalInChat({
+                        model: choice.model,
+                        questions: questions!,
+                        project: project.root,
+                        toolContext: request => chatToolContext(project, request.model),
+                        maxToolRounds: config().get<number>('chat.maxToolRounds', 15),
+                        grade,
+                        config: {
+                            extension: version,
+                            engine: !!project.install,
+                            memory: !!project.memory,
+                            maxResultTokens: config().get<number>('maxResultTokens', DEFAULT_RESULT_TOKENS),
+                        },
+                        token,
+                        onProgress: (done, total, id) => {
+                            const percent = Math.floor((100 * done) / total);
+                            progress.report({ message: id ? `${done + 1} of ${total}: ${id}` : 'writing the report', increment: percent - reported });
+                            reported = percent;
+                        },
+                    });
+                    const markdown = writeReport(path.join(project.root, EVAL_DIR, 'results'), report);
+                    log(`${project.name}: evaluation of ${report.model}: ${report.summary.passed} of ${report.summary.questions} passed → ${markdown}`);
+                    await vscode.window.showTextDocument(vscode.Uri.file(markdown));
+                    void vscode.window.showInformationMessage(`Evaluation: ${report.summary.passed} of ${report.summary.questions} questions passed with ${choice.model.name}.`);
+                },
+            );
+        }),
+
+        vscode.commands.registerCommand('unrealLlmIndex.compareEvaluations', async () => {
+            const project = await pickProject('Compare evaluations of which project?');
+            if (!project) {
+                return;
+            }
+            const dir = path.join(project.root, EVAL_DIR, 'results');
+            const reports = fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort().reverse() : [];
+            if (reports.length < 2) {
+                void vscode.window.showInformationMessage('Unreal LLM Index: run the evaluation at least twice to compare results.');
+                return;
+            }
+            const picked = await vscode.window.showQuickPick(reports, { canPickMany: true, placeHolder: 'Pick two runs to compare (older first is A)' });
+            if (!picked || picked.length !== 2) {
+                return;
+            }
+            const [a, b] = [...picked].sort().map(f => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as EvalReport);
+            const out = path.join(dir, `compare-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.md`);
+            fs.writeFileSync(out, compareReports(a, b), 'utf8');
+            await vscode.window.showTextDocument(vscode.Uri.file(out));
         }),
 
         vscode.commands.registerCommand('unrealLlmIndex.copyUnrealAgent', async () => {

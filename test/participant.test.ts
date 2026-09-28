@@ -101,6 +101,7 @@ describe('@unreal participant', () => {
             rounds: 2,
             toolCalls: ['read_symbol({"name":"ACharacter::Jump"})'],
             read: ['Engine/Source/Runtime/Engine/Classes/GameFramework/Character.h:15-16', 'Engine/Source/Runtime/Engine/Private/Character.cpp:7-11'],
+            maxPromptTokens: expect.any(Number),
         });
 
         const [first, second] = requests;

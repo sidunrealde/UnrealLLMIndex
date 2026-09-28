@@ -27,7 +27,7 @@ export function renderAgentsSection(index: ProjectIndex): string {
         `3. For one file, read \`.llm-index/files/<Module>/<path>.md\` (e.g. ${outline}): every declaration with line numbers, and \`→ file:lines\` links to implementations.`,
         '4. Then read only the line ranges you need from the actual source file.',
         '',
-        `If the \`unreal-llm-index\` MCP tools are available, prefer them: \`find_symbol\` locates a class or function by name, \`read_symbol\` returns just its code (e.g. \`${symbol}\`), and \`search_code\` searches the source. ` +
+        `If the \`unreal-llm-index\` MCP tools are available, prefer them: \`find_symbol\` locates a class or function by name, \`read_symbol\` returns just its code (e.g. \`${symbol}\`), \`find_references\` and \`callers\` show where it is used, and \`search_code\` searches the source. ` +
             'They also cover the engine and its plugins: pass `scope: "engine"` for engine classes such as `ACharacter`, and use `list_plugins` to see which plugins the project enables.',
         '',
         'Project memory: `.llm-memory/` holds notes (decisions, facts, gotchas, open tasks) linked to the code they are about, and INDEX.md lists open tasks and recent decisions. ' +
@@ -43,9 +43,10 @@ const TOOL_STEPS = [
     '2. Use find_symbol to locate something by name. It searches the project and the engine (scope "all"); use scope "engine" for engine classes such as ACharacter or UCharacterMovementComponent.',
     '3. Use get_file_outline or get_module_outline to understand a file or module. Engine modules work too (e.g. "Engine" with a filter such as "GameFramework").',
     '4. Use read_symbol (e.g. "ACharacter::Jump") or read_lines to see code. Fetch only the lines you need; never read whole files, especially engine files.',
-    '5. Use search_code with a short regex if you only know what the code does. For engine code pass scope "engine", optionally with a module, plugin or folder as path_filter.',
-    '6. Use list_plugins to see which engine and Marketplace plugins the project enables.',
-    '7. Project memory carries decisions across sessions. get_index lists open tasks and recent decisions, and read_symbol and get_file_outline show notes about the code you read: follow them. ' +
+    '5. Use find_references to see where a function, type, property or delegate is used (calls, bindings, overrides) before changing it, and callers to trace who calls a function, a few levels up with depth.',
+    '6. Use search_code with a short regex if you only know what the code does. For engine code pass scope "engine", optionally with a module, plugin or folder as path_filter.',
+    '7. Use list_plugins to see which engine and Marketplace plugins the project enables.',
+    '8. Project memory carries decisions across sessions. get_index lists open tasks and recent decisions, and read_symbol and get_file_outline show notes about the code you read: follow them. ' +
         'If a note is marked possibly outdated, check the code, then confirm it with update_note(id) or correct it. ' +
         'When you and the user decide something, learn something non-obvious about the code, hit a gotcha, or leave work unfinished, save it with remember, attached to the symbols involved.',
 ];
