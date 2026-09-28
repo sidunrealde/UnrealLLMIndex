@@ -1,27 +1,23 @@
 /**
- * Minimal agent loop for testing the index end to end with a local Ollama model:
- * starts the MCP server, exposes its tools to the model, and prints each tool call.
+ * Tests the index end to end with any OpenAI-compatible model endpoint:
+ * starts the MCP server, gives its tools to the model, and prints each tool call.
  *
- *   node dist/agent-smoke.js --project <dir> [--model qwen2.5:7b] [--ctx 32768] "question"
+ *   node dist/agent-smoke.js --project <dir> --base-url <url>/v1 --model <name> [--api-key <key>] "question"
+ *
+ * Without those flags, the endpoint, model and key come from $OPENAI_BASE_URL, $OPENAI_MODEL and $OPENAI_API_KEY.
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import * as path from 'path';
-import rules from '../templates/rules/unreal-llm-index.md';
-
-interface ToolCall {
-    function: { name: string; arguments: Record<string, unknown> };
-}
-
-interface ChatMessage {
-    role: 'system' | 'user' | 'assistant' | 'tool';
-    content: string;
-    tool_calls?: ToolCall[];
-    tool_name?: string;
-}
+import { TOOL_AGENT_PROMPT } from '../src/agentInstructions';
+import { runAgentLoop } from '../src/agentLoop';
 
 const USAGE =
-    'Usage: node dist/agent-smoke.js --project <dir> [--model qwen2.5:7b] [--ctx 32768] [--steps 10] [--host http://localhost:11434] "question"';
+    'Usage: node dist/agent-smoke.js --project <dir> --base-url <url>/v1 --model <name> [--api-key <key>] [--steps 10] ' +
+    '[--engine <dir>] [--cache-dir <dir>] [--rg <path>] [--max-result-tokens <n>] "question"';
+
+/** Options passed on to `ue-llm-index serve`. */
+const SERVER_OPTIONS = ['engine', 'cache-dir', 'rg', 'max-result-tokens', 'max-read-lines'];
 
 function parseArgs(argv: string[]) {
     const options: Record<string, string> = {};
@@ -39,67 +35,42 @@ function parseArgs(argv: string[]) {
 async function main() {
     const { options, question } = parseArgs(process.argv.slice(2));
     const project = options.project ?? process.env.UE_LLM_INDEX_PROJECT;
-    if (!project || !question) {
+    const baseUrl = options['base-url'] ?? process.env.OPENAI_BASE_URL;
+    const model = options.model ?? process.env.OPENAI_MODEL;
+    if (!project || !baseUrl || !model || !question) {
         console.error(USAGE);
         process.exit(1);
     }
-    const model = options.model ?? 'qwen2.5:7b';
-    const numCtx = Number(options.ctx ?? 32768);
-    const maxSteps = Number(options.steps ?? 10);
-    const host = options.host ?? 'http://localhost:11434';
 
-    const transport = new StdioClientTransport({
-        command: process.execPath,
-        args: [path.join(__dirname, 'cli.js'), 'serve', project, '--no-write'],
-        stderr: 'inherit',
-    });
-    const client = new Client({ name: 'agent-smoke', version: '0.1.0' });
-    await client.connect(transport);
-
-    const { tools } = await client.listTools();
-    const ollamaTools = tools.map(t => ({
-        type: 'function',
-        function: { name: t.name, description: t.description, parameters: t.inputSchema },
-    }));
-
-    console.log(`model ${model}, num_ctx ${numCtx}, ${tools.length} tools\nQ: ${question}\n`);
-    const messages: ChatMessage[] = [
-        { role: 'system', content: rules },
-        { role: 'user', content: question },
-    ];
+    const client = new Client({ name: 'agent-smoke', version: '0.3.0' });
+    await client.connect(
+        new StdioClientTransport({
+            command: process.execPath,
+            args: [
+                path.join(__dirname, 'cli.js'), 'serve', project, '--no-write',
+                ...SERVER_OPTIONS.filter(name => options[name]).flatMap(name => [`--${name}`, options[name]]),
+            ],
+            stderr: 'inherit',
+        }),
+    );
 
     try {
-        for (let step = 1; step <= maxSteps; step++) {
-            const response = await fetch(`${host}/api/chat`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model, messages, tools: ollamaTools, stream: false, options: { num_ctx: numCtx } }),
-            });
-            if (!response.ok) {
-                throw new Error(`Ollama returned ${response.status}: ${await response.text()}`);
-            }
-            const data = (await response.json()) as { message: ChatMessage; prompt_eval_count?: number; eval_count?: number };
-            const message: ChatMessage = data.message;
-            messages.push(message);
-            console.log(`step ${step}: prompt ${data.prompt_eval_count ?? '?'} tokens, reply ${data.eval_count ?? '?'} tokens`);
-
-            if (!message.tool_calls?.length) {
-                console.log(`\n=== Answer ===\n${message.content}`);
-                return;
-            }
-            for (const call of message.tool_calls) {
-                const args = call.function.arguments ?? {};
-                console.log(`  -> ${call.function.name}(${JSON.stringify(args)})`);
-                const result = await client.callTool({ name: call.function.name, arguments: args });
-                const text = (result.content as { type: string; text?: string }[])
-                    .filter(c => c.type === 'text')
-                    .map(c => c.text)
-                    .join('\n');
-                console.log(`     ${result.isError ? 'ERROR ' : ''}${text.length} chars: ${text.split('\n')[0].slice(0, 100)}`);
-                messages.push({ role: 'tool', content: text, tool_name: call.function.name });
-            }
-        }
-        console.log(`\nStopped after ${maxSteps} steps without a final answer.`);
+        console.log(`model ${model} at ${baseUrl}\nQ: ${question}\n`);
+        const result = await runAgentLoop({
+            client,
+            baseUrl,
+            model,
+            apiKey: options['api-key'] ?? process.env.OPENAI_API_KEY,
+            systemPrompt: TOOL_AGENT_PROMPT,
+            question,
+            maxSteps: Number(options.steps ?? 10),
+            log: line => console.log(line),
+        });
+        console.log(
+            result.answer !== undefined
+                ? `\n=== Answer (${result.steps} steps, max prompt ${result.maxPromptTokens ?? '?'} tokens) ===\n${result.answer}`
+                : `\nStopped after ${result.steps} steps without a final answer.`,
+        );
     } finally {
         await client.close();
     }

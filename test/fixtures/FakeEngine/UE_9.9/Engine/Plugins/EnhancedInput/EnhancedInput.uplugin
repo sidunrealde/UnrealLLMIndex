@@ -1,0 +1,7 @@
+{
+	"FileVersion": 3,
+	"FriendlyName": "Enhanced Input",
+	"Description": "Input mapping contexts and actions.",
+	"EnabledByDefault": false,
+	"Modules": [ { "Name": "EnhancedInput", "Type": "Runtime", "LoadingPhase": "PreDefault" } ]
+}

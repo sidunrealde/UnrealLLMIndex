@@ -128,18 +128,47 @@ describe('incremental refresh and writing', () => {
         expect(index.resolveSymbol('FTelemetryUtils::MakeEventName')[0].definitions).toBeUndefined();
     });
 
-    it('writes INDEX.md, module outlines and symbols.json', () => {
+    it('writes INDEX.md, module summaries, per-file outlines and symbols.json', () => {
         const dir = copyFixture();
         const index = new ProjectIndex(dir);
         index.refresh(true);
         const emitted = writeIndex(index);
         const out = path.join(dir, '.llm-index');
-        expect(fs.readFileSync(path.join(out, 'INDEX.md'), 'utf8')).toContain('# LLM index: SampleGame');
+
+        const md = fs.readFileSync(path.join(out, 'INDEX.md'), 'utf8');
+        expect(md).toContain('# LLM index: SampleGame');
+        // The preamble's example points at an outline file that really exists
+        const example = /Example: (\.llm-index\/\S+\.md)/.exec(md)?.[1];
+        expect(example).toBe('.llm-index/files/SampleGame/Public/SampleCharacter.h.md');
+        expect(fs.existsSync(path.join(dir, example!))).toBe(true);
+
         expect(fs.readdirSync(path.join(out, 'modules')).sort()).toEqual(['SampleGame.md', 'Telemetry.md']);
+        expect(fs.readFileSync(path.join(out, 'modules/SampleGame.md'), 'utf8')).toContain('ASampleCharacter (UCLASS : ACharacter, ISampleInteractable) L');
+
+        // Static outlines use full paths so a file-reading agent can open the source directly
+        const outline = fs.readFileSync(path.join(out, 'files/SampleGame/Public/SampleCharacter.h.md'), 'utf8');
+        expect(outline).toContain('### Source/SampleGame/Public/SampleCharacter.h');
+        expect(outline).toMatch(/→ Source\/SampleGame\/Private\/SampleCharacter\.cpp:\d+-\d+/);
+        expect(fs.existsSync(path.join(out, 'files/Telemetry/Private/Utils.cpp.md'))).toBe(true);
+
         expect(JSON.parse(fs.readFileSync(path.join(out, 'symbols.json'), 'utf8')).symbols.length).toBe(index.allSymbols().length);
         expect(emitted.every(f => f.tokens > 0)).toBe(true);
         // The index folder itself must never be indexed
         index.refresh(true);
         expect(index.indexedFiles().some(f => f.startsWith('.llm-index'))).toBe(false);
+    });
+
+    it('removes outlines of deleted files and empty folders', () => {
+        const dir = copyFixture();
+        const index = new ProjectIndex(dir);
+        index.refresh(true);
+        writeIndex(index);
+        const out = path.join(dir, '.llm-index');
+
+        fs.rmSync(path.join(dir, 'Plugins/Telemetry/Source/Telemetry/Private/Utils.cpp'));
+        index.refresh(true);
+        writeIndex(index);
+        expect(fs.existsSync(path.join(out, 'files/Telemetry/Private'))).toBe(false);
+        expect(fs.existsSync(path.join(out, 'files/Telemetry/Public/Utils.h.md'))).toBe(true);
     });
 });

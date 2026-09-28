@@ -1,0 +1,5 @@
+{
+	"FileVersion": 3,
+	"Description": "Only enabled because DefaultOn needs it.",
+	"Modules": [ { "Name": "Hidden", "Type": "Runtime" } ]
+}

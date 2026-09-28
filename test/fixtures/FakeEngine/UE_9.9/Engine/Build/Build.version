@@ -1,0 +1,10 @@
+{
+	"MajorVersion": 9,
+	"MinorVersion": 9,
+	"PatchVersion": 1,
+	"Changelist": 12345,
+	"CompatibleChangelist": 12000,
+	"IsLicenseeVersion": 0,
+	"IsPromotedBuild": 1,
+	"BranchName": "++UE9+Release-9.9"
+}

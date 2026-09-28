@@ -1,0 +1,8 @@
+{
+	"FileVersion": 3,
+	"FriendlyName": "Fabby Widgets",
+	"Description": "Widgets bought on Fab.",
+	"EnabledByDefault": false,
+	"Installed": true,
+	"Modules": [ { "Name": "Fabby", "Type": "Runtime" } ]
+}

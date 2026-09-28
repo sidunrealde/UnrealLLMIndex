@@ -1,0 +1,7 @@
+{
+	"FileVersion": 3,
+	"Description": "On unless a project turns it off.",
+	"EnabledByDefault": true,
+	"Modules": [ { "Name": "DefaultOn", "Type": "Runtime" } ],
+	"Plugins": [ { "Name": "Hidden", "Enabled": true } ]
+}
