@@ -99,6 +99,11 @@ describe('anchors', () => {
     beforeAll(async () => {
         root = path.join(tempDir('ue-llm-memory-project-'), 'SampleGame');
         copyFixture(SAMPLE_GAME, root);
+        // Windows checkouts (like GitHub's runners) have CRLF line endings; test with those everywhere
+        for (const rel of ['Source/SampleGame/Public/SampleCharacter.h', 'Source/SampleGame/Private/SampleCharacter.cpp']) {
+            const file = path.join(root, rel);
+            fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/\r?\n/g, '\r\n'));
+        }
         project = new ProjectIndex(root);
         project.refresh(true);
         const install = locateEngine('', root, { override: FAKE_ENGINE }) as EngineInstall;
@@ -152,7 +157,7 @@ describe('anchors', () => {
 
         const header = path.join(root, 'Source/SampleGame/Public/SampleCharacter.h');
         fs.writeFileSync(header, fs.readFileSync(header, 'utf8').replace(/\n[^\n]*void ApplyDamage\([^\n]*\n/, '\n'));
-        fs.writeFileSync(cpp, fs.readFileSync(cpp, 'utf8').replace(/void ASampleCharacter::ApplyDamage[\s\S]*?\n}\n/, ''));
+        fs.writeFileSync(cpp, fs.readFileSync(cpp, 'utf8').replace(/void ASampleCharacter::ApplyDamage[\s\S]*?\r?\n}\r?\n/, ''));
         project.refresh(true);
         expect(checkNote(ctx, memory.get(note.id)!).missing).toEqual(['ASampleCharacter::ApplyDamage']);
     });
