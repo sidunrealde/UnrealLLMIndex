@@ -346,6 +346,7 @@ function renderPreamble(index: ProjectIndex): string {
         '',
         'With the unreal-llm-index MCP tools (if available, prefer them):',
         `- get_module_outline(module), get_file_outline(path), find_symbol(query), read_symbol(name) such as "${symbol}", read_lines(path, start, end), search_code(pattern), list_plugins(query).`,
+        '- find_references(name) lists where something is used (calls, delegate and input bindings, overrides); callers(name, depth) traces who calls a function.',
         '- find_symbol, read_symbol and search_code take scope "project", "engine" or "all", so engine classes (e.g. ACharacter) and engine or Marketplace plugin code can be looked up too.',
         '- Tools accept any unique path suffix, such as the file name alone. Engine paths start with "Engine/".',
         '- Project memory: recall(query or about) finds notes from earlier sessions; remember(text, kind, about) saves decisions, facts, gotchas and unfinished tasks. Without the tools, the notes are the files in .llm-memory/.',

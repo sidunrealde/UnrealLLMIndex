@@ -1,12 +1,12 @@
 import { z } from 'zod';
 import { EnabledPlugin, resolveEnabledPlugins } from './engine/enablement';
-import { EngineIndex } from './engine/engineIndex';
-import { ENGINE_TOPS } from './scan';
-import { EngineHandle, EngineProvider, EngineState, renderEngineSection } from './engineContext';
+import { EngineProvider, EngineState, renderEngineSection } from './engineContext';
 import { ProjectIndex, qualifiedName } from './indexer';
 import { isHeader, renderFileOutline, renderIndex, renderModuleSummary } from './outline';
 import { checkNote, MEMORY_DIR, MemoryStore, NOTE_KINDS, noteLine, notesAbout, renderMemorySection, resolveAnchors } from './memory';
-import { ripgrep, searchFiles, SearchHit, toRegex } from './search';
+import { searchFiles, SearchHit, toRegex } from './search';
+import { searchEngineCode } from './codeSearch';
+import { findCallers, findReferences, renderCallers, renderReferences } from './references';
 import { CodeSymbol, PluginInfo, SourceIndex, SourceRange, SymbolKind } from './types';
 
 /** How much a single tool result may contain. */
@@ -159,51 +159,6 @@ function pluginLine(plugin: PluginInfo, enabled?: EnabledPlugin): string {
     const status = enabled ? REASONS[enabled.reason](enabled) : 'not enabled';
     const modules = plugin.modules.length ? `; modules: ${plugin.modules.join(', ')}` : '';
     return `- ${plugin.name}${friendly} [${plugin.category}, ${status}] — ${plugin.description?.replace(/\s+/g, ' ') ?? 'no description'} (${plugin.dir}${modules})`;
-}
-
-/** Engine folders to search: a named module, plugin or folder, or else what the project uses. */
-function engineSearchTargets(handle: EngineHandle, filter?: string): { paths: string[]; globs?: string[]; label: string } {
-    const index = handle.index;
-    if (filter?.trim()) {
-        const f = filter.trim().replace(/\\/g, '/').replace(/\/+$/, '');
-        const module = index.findModule(f);
-        if (module) {
-            return { paths: [module.dir], label: `engine module ${module.name}` };
-        }
-        const plugin = index.findPlugin(f);
-        if (plugin) {
-            return { paths: [plugin.dir], label: `plugin ${plugin.name}` };
-        }
-        if (/^engine\//i.test(f)) {
-            return { paths: [f], label: f };
-        }
-        return { paths: ENGINE_TOPS, globs: [`**/*${f}*/**`, `**/*${f}*`], label: `engine paths containing "${filter}"` };
-    }
-    const moduleDirs = new Map(index.modules().map(m => [m.name.toLowerCase(), m.dir]));
-    const modules = [...handle.depModules.keys()].map(k => moduleDirs.get(k)).filter((d): d is string => !!d);
-    // Plugins the project chose, not the ~200 the engine enables by default
-    const plugins = [...handle.enabled.values()].filter(e => e.plugin.category !== 'project' && e.reason !== 'default').map(e => e.plugin.dir);
-    const sorted = [...new Set([...modules, ...plugins])].sort();
-    const paths = sorted.filter((dir, i) => !sorted.some((other, j) => j !== i && dir.toLowerCase().startsWith(other.toLowerCase() + '/')));
-    return { paths, label: `the ${modules.length} engine modules the project depends on and ${plugins.length} plugins it enables (pass path_filter to search elsewhere)` };
-}
-
-async function searchEngine(ctx: ToolContext, handle: EngineHandle, pattern: string, ignoreCase: boolean, filter: string | undefined, max: number) {
-    const target = engineSearchTargets(handle, filter);
-    if (ctx.rgPath) {
-        const result = await ripgrep({ rgPath: ctx.rgPath, cwd: handle.install.root, paths: target.paths, pattern, ignoreCase, globs: target.globs, maxResults: max });
-        return { ...result, label: target.label };
-    }
-    // Without ripgrep, read the indexed files of the chosen folders
-    const files = filesUnder(handle.index, target.paths).filter(rel => !target.globs || rel.toLowerCase().includes(filter!.trim().toLowerCase()));
-    if (files.length > 3000) {
-        throw new Error(`Searching ${files.length} engine files needs ripgrep, which wasn't found. Pass a narrower path_filter (a module, plugin or folder name).`);
-    }
-    return { ...searchFiles(files, rel => handle.index.readFileLines(rel), toRegex(pattern, ignoreCase), max), label: target.label };
-}
-
-function filesUnder(index: EngineIndex, dirs: string[]): string[] {
-    return dirs.flatMap(dir => index.filesUnder(dir));
 }
 
 const hitLine = (index: SourceIndex | undefined, hit: SearchHit) => `${index ? index.shortPath(hit.path) : hit.path}:${hit.line}: ${hit.text}`;
@@ -470,7 +425,7 @@ export const TOOLS: ToolDef<any>[] = [
                     }
                     notes.push(`Engine not searched: ${state.message}`);
                 } else {
-                    const result = await searchEngine(ctx, state.handle, pattern, ignoreCase, path_filter, max - lines.length);
+                    const result = await searchEngineCode(state.handle, ctx.rgPath, { pattern, ignoreCase, filter: path_filter, maxResults: max - lines.length });
                     lines.push(...result.hits.map(h => hitLine(undefined, h)));
                     total += result.total;
                     notes.push(`Engine: searched ${result.label}${result.complete ? '' : '; stopped early, so there may be more'}.`);
@@ -522,6 +477,49 @@ export const TOOLS: ToolDef<any>[] = [
             const header = `${shown.length} ${scopeText}${query ? ` matching "${query}"` : ''}:`;
             const notice = 'handle' in state ? '' : `\n(Engine plugins not listed: ${state.message})`;
             return capOutput([header, ...shown.map(p => pluginLine(p, enabled.get(p.name.toLowerCase())))].join('\n') + notice, 'Pass a query to narrow the list.', ctx.limits.maxChars);
+        },
+    }),
+
+    defineTool({
+        name: 'find_references',
+        title: 'Find references',
+        description:
+            'Where a symbol is used: calls, delegate and input bindings (AddDynamic, BindAction), overrides, and uses of types and properties, each with the function it is in. ' +
+            'Found by name and sorted with the parser, so same-named members of other classes are left out and uncertain hits are marked. Use before changing a function or type.',
+        input: {
+            name: z.string().describe('Symbol, qualified when the name is common, e.g. "ACharacter::Jump", "FHouseLayout" or "OnHealthChanged"'),
+            scope: scopeInput('all'),
+            path_filter: z.string().optional().describe('Project: only paths containing this text. Engine: a module, plugin or folder name'),
+            include_text: z.boolean().optional().describe('Also list other mentions: comments, strings, and a function name used without a call (default false)'),
+            limit: z.number().int().min(1).max(200).optional().describe('Maximum references listed (default 50)'),
+        },
+        run: async ({ name, scope, path_filter, include_text, limit }, ctx) => {
+            const result = await findReferences(ctx, name, { scope, pathFilter: path_filter, includeText: include_text });
+            if ('error' in result) {
+                return result.error;
+            }
+            return capOutput(renderReferences(result, limit ?? 50), 'Narrow with path_filter or scope.', ctx.limits.maxChars);
+        },
+    }),
+
+    defineTool({
+        name: 'callers',
+        title: 'Callers',
+        description:
+            'Which functions call a function, or bind it to a delegate or input, and optionally who calls those (depth up to 3). Built on find_references, so it is name-based; ' +
+            'calls from Blueprints and through function pointers are not traced.',
+        input: {
+            name: z.string().describe('Function, e.g. "ACharacter::Jump" or "UHouseSubsystem::Generate"'),
+            depth: z.number().int().min(1).max(3).optional().describe('Levels of callers to follow (default 1)'),
+            scope: scopeInput('all'),
+            path_filter: z.string().optional().describe('Project: only paths containing this text. Engine: a module, plugin or folder name'),
+        },
+        run: async ({ name, depth, scope, path_filter }, ctx) => {
+            const result = await findCallers(ctx, name, { depth, scope, pathFilter: path_filter });
+            if ('error' in result) {
+                return result.error;
+            }
+            return capOutput(renderCallers(result, 60), 'Lower depth or narrow with path_filter.', ctx.limits.maxChars);
         },
     }),
 
