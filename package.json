@@ -1,7 +1,7 @@
 {
   "name": "unreal-llm-index",
   "displayName": "Unreal LLM Index",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Unreal Engine-aware index of your UE C++ project, its engine and Marketplace (Fab) plugins for any LLM in VS Code chat: find code and its callers, keep project memory across sessions, and evaluate how well your model answers.",
   "publisher": "sidunrealde",
   "license": "MIT",
@@ -70,6 +70,16 @@
       }
     ],
     "commands": [
+      {
+        "command": "unrealLlmIndex.updateIndex",
+        "title": "Update Index",
+        "category": "Unreal LLM Index"
+      },
+      {
+        "command": "unrealLlmIndex.showMenu",
+        "title": "Show Actions",
+        "category": "Unreal LLM Index"
+      },
       {
         "command": "unrealLlmIndex.rebuild",
         "title": "Rebuild Index",
@@ -152,7 +162,7 @@
           ],
           "enumDescriptions": [
             "Build the engine index when a project is opened, and update it when the engine or its plugins change (checked at most every 12 hours).",
-            "Only when you run \"Unreal LLM Index: Sync Engine Index\"."
+            "Only when you ask: \"Update index\" in the status bar menu, the \"Unreal LLM Index: Update Index\" command, or \"Index now\" when an engine has no index yet."
           ],
           "default": "onStartup",
           "description": "When to build and update the engine index."

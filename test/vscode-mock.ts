@@ -45,6 +45,10 @@ export class ThemeIcon {
     constructor(readonly id: string) {}
 }
 
+export class ThemeColor {
+    constructor(readonly id: string) {}
+}
+
 export class Position {
     constructor(readonly line: number, readonly character: number) {}
 }
@@ -156,6 +160,12 @@ export const mock = {
     progress: [] as { title?: string; location: ProgressLocation }[],
     openedDocuments: [] as string[],
     statusText: '',
+    statusCommand: undefined as string | undefined,
+    statusBackground: undefined as ThemeColor | undefined,
+    /** Which quick pick item the "user" picks; the first by default. */
+    pick: (items: any[]) => items[0],
+    /** Quick picks shown, most recent last. */
+    quickPicks: [] as { items: any[]; options?: { title?: string; placeHolder?: string } }[],
     reset() {
         this.uprojects = [];
         this.workspaceFolders = [];
@@ -169,6 +179,10 @@ export const mock = {
         this.progress = [];
         this.openedDocuments = [];
         this.statusText = '';
+        this.statusCommand = undefined;
+        this.statusBackground = undefined;
+        this.pick = (items: any[]) => items[0];
+        this.quickPicks = [];
     },
 };
 
@@ -178,8 +192,19 @@ export const window = {
     activeTextEditor: undefined as undefined | { document: { uri: Uri } },
     createOutputChannel: () => ({ appendLine() {}, dispose() {} }),
     createStatusBarItem: () => ({
-        command: undefined as string | undefined,
         tooltip: '',
+        set command(value: string | undefined) {
+            mock.statusCommand = value;
+        },
+        get command() {
+            return mock.statusCommand;
+        },
+        set backgroundColor(value: ThemeColor | undefined) {
+            mock.statusBackground = value;
+        },
+        get backgroundColor() {
+            return mock.statusBackground;
+        },
         set text(value: string) {
             mock.statusText = value;
         },
@@ -202,7 +227,10 @@ export const window = {
         mock.messages.push(message);
         return undefined;
     },
-    showQuickPick: async (items: any[]) => items[0],
+    showQuickPick: async (items: any[], options?: { title?: string; placeHolder?: string }) => {
+        mock.quickPicks.push({ items, options });
+        return mock.pick(items);
+    },
     showOpenDialog: async () => undefined,
     showTextDocument: async (uri: Uri) => {
         mock.openedDocuments.push(uri.fsPath);
@@ -253,6 +281,8 @@ export const commands = {
     executeCommand: async (id: string, ...args: unknown[]) => {
         if (id === 'setContext') {
             mock.contextKeys[args[0] as string] = args[1];
+        } else if (mock.commands.has(id)) {
+            return mock.commands.get(id)!(...args);
         }
     },
 };
