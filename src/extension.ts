@@ -45,7 +45,7 @@ interface RunningSync {
 export function activate(context: vscode.ExtensionContext) {
     const output = vscode.window.createOutputChannel('Unreal LLM Index');
     const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 50);
-    status.command = 'unrealLlmIndex.openIndex';
+    status.command = 'unrealLlmIndex.showMenu';
     const serversChanged = new vscode.EventEmitter<void>();
     const cliPath = context.asAbsolutePath(path.join('dist', 'cli.js'));
     const rgPath = findRipgrep(vscode.env.appRoot);
@@ -58,20 +58,46 @@ export function activate(context: vscode.ExtensionContext) {
 
     const log = (message: string) => output.appendLine(`[${new Date().toLocaleTimeString()}] ${message}`);
 
+    type EngineStatus = { kind: 'off' | 'missing' | 'building' | 'notIndexed' | 'indexed'; text: string };
+
+    /** Where a project's engine index stands, in words for the status bar and the menu. */
+    function engineStatus(p: IndexedProject): EngineStatus {
+        if (!p.install) {
+            return p.engineError ? { kind: 'missing', text: 'no engine found' } : { kind: 'off', text: 'engine lookups off' };
+        }
+        const label = `UE ${versionLabel(p.install.version)}`;
+        const sync = syncs.get(p.install.root.toLowerCase());
+        if (sync) {
+            return { kind: 'building', text: `${label} indexing${sync.percent !== undefined ? ` ${sync.percent}%` : '…'}` };
+        }
+        const state = p.engine.state();
+        if (!('handle' in state)) {
+            return { kind: 'notIndexed', text: `${label} not indexed yet` };
+        }
+        const meta = state.handle.index.meta();
+        const hours = (Date.now() - Number(meta.last_sync)) / 3600_000;
+        const age = hours < 1 ? 'less than an hour ago' : hours < 48 ? `${Math.round(hours)} h ago` : `${Math.round(hours / 24)} days ago`;
+        return { kind: 'indexed', text: `${label} indexed (${Number(meta.files).toLocaleString('en-US')} files), updated ${age}` };
+    }
+
     function updateStatus() {
         if (!projects.length) {
             status.hide();
             return;
         }
         const running = [...syncs.values()].find(s => s.percent !== undefined);
-        const lines = projects.map(p => {
-            const engine = p.install
-                ? `UE ${versionLabel(p.install.version)}${syncs.has(p.install.root.toLowerCase()) ? ' (indexing)' : 'handle' in p.engine.state() ? ' indexed' : ' not indexed yet'}`
-                : p.engineError ?? 'engine lookups off';
-            return `${p.name}: ${p.index.allSymbols().length} symbols in ${p.index.indexedFiles().length} files; ${engine}`;
-        });
-        status.text = running ? `$(book) LLM Index $(sync~spin) ${running.percent}%` : '$(book) LLM Index';
-        status.tooltip = `${lines.join('\n')}\nClick to open INDEX.md`;
+        const engines = projects.map(engineStatus);
+        const lines = projects.map((p, i) => `${p.name}: ${p.index.allSymbols().length} symbols in ${p.index.indexedFiles().length} files; ${engines[i].text}`);
+        const notIndexed = engines.some(e => e.kind === 'notIndexed');
+        if (running) {
+            status.text = `$(sync~spin) LLM Index ${running.percent}%`;
+        } else if (notIndexed) {
+            status.text = '$(warning) LLM Index: engine not indexed';
+        } else {
+            status.text = '$(book) LLM Index';
+        }
+        status.backgroundColor = notIndexed && !running ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;
+        status.tooltip = `${lines.join('\n')}\nClick for actions: update the index, rebuild the engine database, open INDEX.md`;
         status.show();
     }
 
@@ -177,6 +203,13 @@ export function activate(context: vscode.ExtensionContext) {
                                 log(event.skipped
                                     ? `Engine index for ${install.root} is up to date`
                                     : `Indexed ${install.root}: ${event.files} files, ${event.symbols} symbols (${event.parsed} parsed, ${event.removed} removed) in ${(event.ms / 1000).toFixed(1)} s`);
+                                if (options.notify) {
+                                    const label = `Unreal Engine ${versionLabel(install.version)}`;
+                                    const changes = event.parsed || event.removed ? `${event.parsed} files parsed, ${event.removed} removed` : 'nothing had changed';
+                                    void vscode.window.showInformationMessage(
+                                        `Unreal LLM Index: ${label} index ${first ? 'built' : 'updated'}: ${Number(event.files).toLocaleString('en-US')} files, ${Number(event.symbols).toLocaleString('en-US')} symbols; ${changes} (${(event.ms / 1000).toFixed(1)} s).`,
+                                    );
+                                }
                             } else if (event.type === 'error') {
                                 busy = !!event.busy;
                                 log(`Engine indexing: ${event.message}`);
@@ -222,10 +255,43 @@ export function activate(context: vscode.ExtensionContext) {
     /** Each engine once, with a project that uses it. */
     const engines = () => [...new Map(projects.filter(p => p.install).map(p => [p.install!.root.toLowerCase(), p.install!])).values()];
 
+    const offeredIndexing = new Set<string>();
+
     function autoSync() {
         if (config().get<string>('engine.autoSync', 'onStartup') === 'onStartup') {
             engines().forEach(install => void syncEngine(install, { ifStale: true }));
+            return;
         }
+        // Manual mode: offer to build an engine database that doesn't exist yet, once per session
+        for (const project of projects) {
+            const install = project.install;
+            if (!install || engineStatus(project).kind !== 'notIndexed' || offeredIndexing.has(install.root.toLowerCase())) {
+                continue;
+            }
+            offeredIndexing.add(install.root.toLowerCase());
+            void vscode.window
+                .showInformationMessage(
+                    `Unreal LLM Index: Unreal Engine ${versionLabel(install.version)}, used by ${project.name}, isn't indexed yet, so engine lookups are off.`,
+                    'Index now',
+                )
+                .then(choice => {
+                    if (choice) {
+                        void syncEngine(install, { notify: true });
+                    }
+                });
+        }
+    }
+
+    /** The project map and every engine database: re-parse what changed, and build a database that doesn't exist. */
+    async function updateIndex() {
+        projects.forEach(p => build(p, 'manual update', true));
+        const list = engines();
+        if (!list.length) {
+            const reason = projects.map(p => p.engineError).find(Boolean);
+            void vscode.window.showInformationMessage(`Unreal LLM Index: project index updated.${reason ? ` No engine to index: ${reason}` : ''}`);
+            return;
+        }
+        await Promise.all(list.map(install => syncEngine(install, { notify: true })));
     }
 
     function watch(project: IndexedProject) {
@@ -404,6 +470,34 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     context.subscriptions.push(
+        vscode.commands.registerCommand('unrealLlmIndex.updateIndex', () => updateIndex()),
+
+        vscode.commands.registerCommand('unrealLlmIndex.showMenu', async () => {
+            if (!projects.length) {
+                void vscode.window.showWarningMessage('Unreal LLM Index: no .uproject found in this workspace.');
+                return;
+            }
+            const summary = projects.map(p => `${p.name}: ${engineStatus(p).text}`).join(' · ');
+            const hasEngine = engines().length > 0;
+            const items: (vscode.QuickPickItem & { command: string })[] = [
+                {
+                    label: '$(sync) Update index',
+                    description: hasEngine ? 'Re-parse what changed, and build the engine database if it doesn\'t exist yet' : 'Re-parse the project',
+                    command: 'unrealLlmIndex.updateIndex',
+                },
+                ...(hasEngine
+                    ? [{ label: '$(database) Rebuild engine database', description: 'Parse the whole engine again, from scratch', command: 'unrealLlmIndex.rebuildEngineIndex' }]
+                    : []),
+                { label: '$(book) Open INDEX.md', description: 'The project map agents start from', command: 'unrealLlmIndex.openIndex' },
+                { label: '$(settings-gear) Select engine…', description: 'Choose which engine install to index', command: 'unrealLlmIndex.selectEngine' },
+                { label: '$(beaker) Run evaluation…', description: 'Ask a chat model your evaluation questions and get a report', command: 'unrealLlmIndex.runEvaluation' },
+            ];
+            const choice = await vscode.window.showQuickPick(items, { title: 'Unreal LLM Index', placeHolder: summary });
+            if (choice) {
+                await vscode.commands.executeCommand(choice.command);
+            }
+        }),
+
         vscode.commands.registerCommand('unrealLlmIndex.rebuild', () => {
             projects.forEach(p => build(p, 'manual rebuild', true));
             if (projects.length) {

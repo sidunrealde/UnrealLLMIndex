@@ -28,7 +28,18 @@ This guide covers everything the extension does and how to get the most from it 
 3. **Indexes the engine in the background** with a progress notification. This covers the engine source, every engine plugin, and Marketplace/Fab plugins installed in the engine. It takes about 15 seconds to a minute the first time, and the index is shared by every project on that engine.
 4. **Registers the tools** with VS Code chat and adds the **Unreal** agent and the `@unreal` participant.
 
-The **LLM Index** item in the status bar shows the state. Hover over it for symbol counts and engine status, or click it to open the project map (`INDEX.md`).
+**The status bar.** The **LLM Index** item shows the state:
+- **LLM Index** with a book icon: everything is indexed.
+- **LLM Index 42%** with a spinning icon: the engine is being indexed.
+- **LLM Index: engine not indexed** with a warning icon and background: the engine has no database yet, so engine lookups are off. Click it and choose **Update index**.
+
+Hover over it for symbol counts and when the engine was last indexed. Click it for the actions menu:
+- **Update index:** parses the project again, and updates the engine database, or creates it if it doesn't exist yet. Only files that changed are parsed again.
+- **Rebuild engine database:** parses the whole engine again, from scratch.
+- **Open INDEX.md:** the project map agents start from.
+- **Select engine…** and **Run evaluation…**
+
+**Update Index** is also a command, so you can bind a key to it.
 
 **Your repository.** Add these to `.gitignore`:
 
@@ -121,9 +132,14 @@ Third-party libraries, programs, plugin templates, generated headers, and Bluepr
 - **Shared:** every project and VS Code window using that engine uses the same database.
 - **Read-only engine:** the engine folder itself is never written to.
 
-**Keeping it current.** On startup the index is updated if it's more than 12 hours old, if the engine was updated, or if plugins were added. An update re-parses only files that changed. To do it by hand:
-- **Sync Engine Index** updates now.
-- **Rebuild Engine Index** parses everything again.
+**Keeping it current.** On startup the index is updated if it's more than 12 hours old, if the engine was updated, or if plugins were added. An update re-parses only files that changed.
+
+With `unrealLlmIndex.engine.autoSync` set to `manual`, nothing runs on startup. An engine without a database gets a notification with an **Index now** button instead, once per session.
+
+To do it by hand, click **LLM Index** in the status bar, or run one of these commands:
+- **Update Index** updates the project and the engine database, creating the database if needed. A notification reports what changed.
+- **Sync Engine Index** updates only the engine database.
+- **Rebuild Engine Index** parses the whole engine again.
 - **Clear Engine Index Cache** deletes the databases.
 
 **What ranks first.** Engine results are ranked by what your project uses:
@@ -302,7 +318,7 @@ Paths can be any unique suffix, such as `Character.h` or `GameFramework/Characte
 | Setting | Default | What it does |
 |---|---|---|
 | `unrealLlmIndex.engine.enabled` | `true` | Index the engine and its plugins. |
-| `unrealLlmIndex.engine.autoSync` | `onStartup` | `manual`: only sync when you run **Sync Engine Index**. |
+| `unrealLlmIndex.engine.autoSync` | `onStartup` | `manual`: only update the engine database when you ask, with **Update Index** or **Index now**. |
 | `unrealLlmIndex.enginePath` | | The engine folder, instead of the project's `EngineAssociation`. |
 | `unrealLlmIndex.cacheDir` | user cache | Where engine indexes are kept. |
 | `unrealLlmIndex.memory.enabled` | `true` | Keep project memory in `.llm-memory/`. |
@@ -318,6 +334,8 @@ All commands are in the Command Palette under **Unreal LLM Index**.
 
 | Command | What it does |
 |---|---|
+| **Update Index** | Parse the project again, and update or create the engine database. |
+| **Show Actions** | The status bar menu. |
 | **Open INDEX.md** / **Rebuild Index** | Open or rebuild the project map. |
 | **Sync Engine Index** / **Rebuild Engine Index** | Update the engine index, or parse the whole engine again. |
 | **Select Engine…** | Choose which engine install to index. |
@@ -365,6 +383,8 @@ A typical MCP client configuration:
 - **Check what's actually installed:** the registry can list engine versions that are no longer installed. The message lists what was tried.
 - **Install that version,** or point to another one with **Select Engine…**.
 - **See every install found** with `engine list`.
+
+**The status bar says "engine not indexed".** The engine database doesn't exist yet, usually because `engine.autoSync` is `manual` or the first build was cancelled. Click the status bar item and choose **Update index**.
 
 **The engine index is "being built" for a long time.** Another VS Code window may be building it; it's shared, and the second window waits for the first. The **Unreal LLM Index** output channel shows progress. A full build of UE 5.8 takes about 15 seconds on a many-core machine and longer on fewer cores.
 

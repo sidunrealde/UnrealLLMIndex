@@ -53,8 +53,40 @@ describe('extension', () => {
 
     it('builds .llm-index/ on activation and shows the status bar item', () => {
         expect(fs.existsSync(path.join(dir, '.llm-index/files/SampleGame/Public/SampleCharacter.h.md'))).toBe(true);
-        expect(mock.statusText).toBe('$(book) LLM Index');
+        expect(mock.statusCommand).toBe('unrealLlmIndex.showMenu');
         expect(mock.contextKeys).toEqual({ 'unrealLlmIndex.hasProject': true, 'unrealLlmIndex.hasWorkspaceAgent': false });
+    });
+
+    it('warns in the status bar and offers to index an engine that has no database yet, once', async () => {
+        expect(mock.statusText).toBe('$(warning) LLM Index: engine not indexed');
+        expect(mock.statusBackground?.id).toBe('statusBarItem.warningBackground');
+        const offers = () => mock.messages.filter(m => m.includes("isn't indexed yet"));
+        expect(offers()).toEqual([`Unreal LLM Index: Unreal Engine 9.9.1, used by ${path.basename(dir)}, isn't indexed yet, so engine lookups are off.`]);
+
+        await syncEngineIndex({ engineRoot: FAKE_ENGINE, cacheDir, jobs: 1 });
+        await mock.commands.get('unrealLlmIndex.rebuild')!();
+        expect(mock.statusText).toBe('$(book) LLM Index');
+        expect(mock.statusBackground).toBeUndefined();
+        expect(offers()).toHaveLength(1);
+    });
+
+    it('opens a menu of actions from the status bar', async () => {
+        mock.pick = items => items.find(i => i.label.includes('Open INDEX.md'));
+        await mock.commands.get('unrealLlmIndex.showMenu')!();
+        const [{ items, options }] = mock.quickPicks;
+        expect(items.map(i => i.label)).toEqual([
+            '$(sync) Update index',
+            '$(database) Rebuild engine database',
+            '$(book) Open INDEX.md',
+            '$(settings-gear) Select engine…',
+            '$(beaker) Run evaluation…',
+        ]);
+        expect(options?.placeHolder).toBe(`${path.basename(dir)}: UE 9.9.1 not indexed yet`);
+        expect(mock.openedDocuments).toEqual([path.join(dir, '.llm-index', 'INDEX.md')]);
+
+        await syncEngineIndex({ engineRoot: FAKE_ENGINE, cacheDir, jobs: 1 });
+        await mock.commands.get('unrealLlmIndex.showMenu')!();
+        expect(mock.quickPicks[1].options?.placeHolder).toBe(`${path.basename(dir)}: UE 9.9.1 indexed (15 files), updated less than an hour ago`);
     });
 
     it('registers an MCP server that runs the bundled CLI on VS Code\'s Node with the project\'s engine', async () => {
@@ -159,6 +191,12 @@ describe('extension with engine lookups and memory turned off', () => {
             const indexMd = fs.readFileSync(path.join(dir, '.llm-index/INDEX.md'), 'utf8');
             expect(indexMd).toContain('Engine lookups are turned off');
             expect(indexMd).not.toContain('## Project memory');
+            expect(mock.statusText).toBe('$(book) LLM Index');
+
+            await mock.commands.get('unrealLlmIndex.updateIndex')!();
+            expect(mock.messages.at(-1)).toBe('Unreal LLM Index: project index updated.');
+            await mock.commands.get('unrealLlmIndex.showMenu')!();
+            expect(mock.quickPicks[0].items.map(i => i.label)).not.toContain('$(database) Rebuild engine database');
         } finally {
             context.subscriptions.forEach((d: { dispose(): void }) => d.dispose());
             fs.rmSync(dir, { recursive: true, force: true });

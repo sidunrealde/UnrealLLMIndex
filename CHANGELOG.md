@@ -20,6 +20,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - **Reports:** Markdown and JSON in `.llm-eval/results/`, and **Compare Evaluation Results** / `eval compare` puts two runs side by side.
   - **Starter set:** **Create Evaluation Questions** / `eval init` generates questions from the project's index.
 - **Documentation:** a [user guide](docs/USER_GUIDE.md) and a [design document](docs/DESIGN.md). The README is now a short introduction.
+- **Status bar actions.** Clicking **LLM Index** opens a menu:
+  - **Update index:** parses the project again and updates the engine database, or creates it if it doesn't exist. A notification reports what changed.
+  - **Rebuild engine database**, **Open INDEX.md**, **Select engine…** and **Run evaluation…**
+- **Update Index** and **Show Actions** commands, so you can bind keys to them.
+- **Engine index state:**
+  - The status bar warns when the engine has no database yet, and its tooltip says when the engine was last indexed.
+  - With `engine.autoSync` set to `manual`, a notification offers **Index now** for an engine that isn't indexed.
 
 ### Changed
 - `@unreal` reports an estimate of its largest prompt, and can leave out the memory-writing tools; evaluation runs never write memory.

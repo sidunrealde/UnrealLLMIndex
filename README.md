@@ -23,7 +23,7 @@ Use a Copilot model, or add your own. For example, add a self-hosted Qwen served
 ## Getting started
 
 1. Install the extension and open a folder that contains a `.uproject`.
-2. The project is indexed right away. The engine is indexed in the background the first time, in about 15 seconds to a minute, and kept up to date after that.
+2. The project is indexed right away. The engine is indexed in the background the first time, in about 15 seconds to a minute, and kept up to date after that. To update it yourself, click **LLM Index** in the status bar and choose **Update index**.
 3. In chat, ask something like `@unreal how does ACharacter::Jump reach UCharacterMovementComponent?`
 
 Requires VS Code 1.138 or later and a chat model that supports tool calling. Windows, macOS and Linux; the engine is found through the Epic launcher, the registry, or a source build's registration.

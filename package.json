@@ -71,6 +71,16 @@
     ],
     "commands": [
       {
+        "command": "unrealLlmIndex.updateIndex",
+        "title": "Update Index",
+        "category": "Unreal LLM Index"
+      },
+      {
+        "command": "unrealLlmIndex.showMenu",
+        "title": "Show Actions",
+        "category": "Unreal LLM Index"
+      },
+      {
         "command": "unrealLlmIndex.rebuild",
         "title": "Rebuild Index",
         "category": "Unreal LLM Index"
@@ -152,7 +162,7 @@
           ],
           "enumDescriptions": [
             "Build the engine index when a project is opened, and update it when the engine or its plugins change (checked at most every 12 hours).",
-            "Only when you run \"Unreal LLM Index: Sync Engine Index\"."
+            "Only when you ask: \"Update index\" in the status bar menu, the \"Unreal LLM Index: Update Index\" command, or \"Index now\" when an engine has no index yet."
           ],
           "default": "onStartup",
           "description": "When to build and update the engine index."
